@@ -30,6 +30,15 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS admin_notification_settings (
+                admin_id INTEGER NOT NULL,
+                notification_type TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(admin_id, notification_type),
+                FOREIGN KEY(admin_id) REFERENCES admins(user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -207,6 +216,72 @@ def get_admin_ids() -> list[int]:
     with db() as conn:
         rows = conn.execute("SELECT user_id FROM admins ORDER BY user_id").fetchall()
     return [int(row["user_id"]) for row in rows]
+
+
+# Настройки отсутствуют у новых и старых администраторов до первого изменения.
+# Это означает «включено», поэтому после обновления никто не пропустит уведомления.
+ADMIN_NOTIFICATION_TYPES = {
+    "tickets": "Обращения",
+    "requests": "Заявки",
+    "payments": "Оплаты",
+}
+
+
+def get_admin_notification_settings(admin_id: int) -> dict[str, bool]:
+    settings = {kind: True for kind in ADMIN_NOTIFICATION_TYPES}
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT notification_type, enabled FROM admin_notification_settings WHERE admin_id = ?",
+            (admin_id,),
+        ).fetchall()
+    for row in rows:
+        kind = str(row["notification_type"])
+        if kind in settings:
+            settings[kind] = bool(row["enabled"])
+    return settings
+
+
+def set_admin_notification_setting(admin_id: int, notification_type: str, enabled: bool) -> bool:
+    if notification_type not in ADMIN_NOTIFICATION_TYPES or not is_admin(admin_id):
+        return False
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_notification_settings(admin_id, notification_type, enabled, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(admin_id, notification_type) DO UPDATE SET
+                enabled = excluded.enabled, updated_at = excluded.updated_at
+            """,
+            (admin_id, notification_type, int(enabled), now_iso()),
+        )
+    return True
+
+
+def get_admin_ids_for_notification(notification_type: str) -> list[int]:
+    if notification_type not in ADMIN_NOTIFICATION_TYPES:
+        return get_admin_ids()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.user_id
+            FROM admins a
+            LEFT JOIN admin_notification_settings s
+                ON s.admin_id = a.user_id AND s.notification_type = ?
+            WHERE COALESCE(s.enabled, 1) = 1
+            ORDER BY a.user_id
+            """,
+            (notification_type,),
+        ).fetchall()
+    return [int(row["user_id"]) for row in rows]
+
+
+def remove_admin(admin_id: int) -> bool:
+    if admin_id == SUPER_ADMIN_ID:
+        return False
+    with db() as conn:
+        conn.execute("DELETE FROM admin_notification_settings WHERE admin_id = ?", (admin_id,))
+        cur = conn.execute("DELETE FROM admins WHERE user_id = ?", (admin_id,))
+    return cur.rowcount > 0
 
 
 def is_admin(user_id: Optional[int]) -> bool:

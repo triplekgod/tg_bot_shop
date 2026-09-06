@@ -140,7 +140,7 @@ async def notify_admins_about_user_message(
                 save_admin_message_map(admin_id, copied.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить обращение админу %s: %s", admin_id, exc)
-    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("tickets")))
 
 
 async def notify_admins_about_renew_request(
@@ -207,7 +207,7 @@ async def notify_admins_about_renew_request(
             save_admin_message_map(admin_id, sent_header.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить заявку на продление админу %s: %s", admin_id, exc)
-    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("requests")))
 
 
 async def notify_admins_about_payment_done(
@@ -252,7 +252,7 @@ async def notify_admins_about_payment_done(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user_id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить подтверждение оплаты админу %s: %s", admin_id, exc)
-    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("payments")))
 
 
 async def send_stars_invoice_to_client(
@@ -402,7 +402,7 @@ async def notify_admins_about_auto_stars_renewal(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user_id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить уведомление об автопродлении админу %s: %s", admin_id, exc)
-    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("payments")))
 
 
 async def notify_admins_about_stars_auto_error(
@@ -417,7 +417,7 @@ async def notify_admins_about_stars_auto_error(
         f"Причина: <code>{html.escape(error_text)}</code>\n\n"
         "Откройте заявку и укажите email вручную либо продлите по email без привязки."
     )
-    for admin_id in get_admin_ids():
+    for admin_id in get_admin_ids_for_notification("payments"):
         try:
             sent = await context.bot.send_message(
                 chat_id=admin_id,
@@ -523,7 +523,7 @@ async def notify_admins_about_subscription_request(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить заявку на оформление админу %s: %s", admin_id, exc)
-    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("requests")))
 
 
 async def send_subscription_stars_invoice_to_client(
@@ -772,7 +772,7 @@ async def notify_admins_about_subscription_created(
         text += "\n\n⚠️ Детали:\n" + "\n".join(f"• {html.escape(str(e))}" for e in errors[:5])
     text += "\n\nКнопка «✅ Создать клиента» скрыта, обращение закрыто."
 
-    for admin_id in get_admin_ids():
+    for admin_id in get_admin_ids_for_notification("requests"):
         try:
             sent = await context.bot.send_message(
                 chat_id=admin_id,
@@ -892,7 +892,7 @@ async def try_auto_create_subscription_after_stars_payment(
         async with XuiClient() as api:
             result = await api.add_client(email, days, user_id)
     except XuiApiError as exc:
-        for admin_id in get_admin_ids():
+        for admin_id in get_admin_ids_for_notification("requests"):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -1033,7 +1033,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         topup_id = create_balance_topup(user.id, amount, method)
         method_label = "криптовалютой" if method == "crypto" else "P2P"
         if method in {"p2p", "crypto"}:
-            for admin_id in get_admin_ids():
+            for admin_id in get_admin_ids_for_notification("payments"):
                 try:
                     await context.bot.send_message(
                         chat_id=admin_id,
@@ -1493,6 +1493,45 @@ async def handle_admin_stars_invoice_input(update: Update, context: ContextTypes
     return True
 
 
+def admin_management_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for admin_id in get_admin_ids():
+        admin = get_user(admin_id)
+        name = " ".join(filter(None, [admin["first_name"], admin["last_name"]])) if admin else ""
+        label = f"{'👑 ' if is_super_admin(admin_id) else ''}{admin_id}"
+        if name:
+            label += f" · {name[:20]}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"adminsettings:{admin_id}")])
+    buttons.append([InlineKeyboardButton("➕ Добавить администратора", callback_data="adminsettings:add")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def admin_notification_keyboard(admin_id: int) -> InlineKeyboardMarkup:
+    settings = get_admin_notification_settings(admin_id)
+    buttons = []
+    for kind, label in ADMIN_NOTIFICATION_TYPES.items():
+        mark = "✅" if settings[kind] else "❌"
+        buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"admintoggle:{admin_id}:{kind}")])
+    if not is_super_admin(admin_id):
+        buttons.append([InlineKeyboardButton("🗑 Удалить администратора", callback_data=f"adminremove:{admin_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ К списку администраторов", callback_data="adminsettings:list")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def send_admin_notification_settings(message: Message, admin_id: int) -> None:
+    admin = get_user(admin_id)
+    name = " ".join(filter(None, [admin["first_name"], admin["last_name"]])) if admin else "не запускал бота"
+    settings = get_admin_notification_settings(admin_id)
+    lines = [
+        f"👤 Администратор <code>{admin_id}</code>{' 👑' if is_super_admin(admin_id) else ''}",
+        f"Имя: {html.escape(name)}",
+        "",
+        "Типы уведомлений:",
+    ]
+    lines.extend(f"{'✅' if enabled else '❌'} {label}" for kind, label in ADMIN_NOTIFICATION_TYPES.items() for enabled in [settings[kind]])
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=admin_notification_keyboard(admin_id))
+
+
 async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.effective_message
     if not message or not message.text:
@@ -1509,11 +1548,19 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
     }
     if text in sections:
         title, section = sections[text]
-        await message.reply_text(title, reply_markup=admin_section_keyboard(section))
+        admin_id = update.effective_user.id if update.effective_user else None
+        await message.reply_text(title, reply_markup=admin_section_keyboard(section, admin_id))
         return True
 
     if text == ADMIN_BUTTON_BACK:
         await message.reply_text("Главное меню администратора.", reply_markup=admin_main_keyboard())
+        return True
+
+    if text == ADMIN_BUTTON_ADMIN_SETTINGS:
+        if not is_super_admin(update.effective_user.id if update.effective_user else None):
+            await message.reply_text("Настройка администраторов доступна только главному администратору.")
+            return True
+        await message.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
         return True
 
     if text == ADMIN_BUTTON_TICKETS:
@@ -1602,6 +1649,23 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if await handle_admin_menu_button(update, context):
+        return
+
+    if context.user_data.get("admin_waiting_new_admin"):
+        context.user_data.pop("admin_waiting_new_admin", None)
+        try:
+            new_admin_id = int((message.text or "").strip())
+        except ValueError:
+            new_admin_id = 0
+        if new_admin_id <= 0:
+            await message.reply_text("Отправьте корректный Telegram ID администратора.", reply_markup=admin_main_keyboard())
+            return
+        with db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO admins(user_id, added_by, created_at) VALUES (?, ?, ?)",
+                (new_admin_id, admin.id, now_iso()),
+            )
+        await message.reply_text(f"✅ Администратор {new_admin_id} добавлен.", reply_markup=admin_management_keyboard())
         return
 
     if await handle_admin_stars_invoice_input(update, context):
@@ -2690,6 +2754,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("admin_sending_subscription_payment_details_ticket_id", None)
     context.user_data.pop("admin_sending_balance_details_topup_id", None)
     context.user_data.pop("admin_edit_user_price", None)
+    context.user_data.pop("admin_waiting_new_admin", None)
     context.user_data.pop("admin_waiting_subscription_ticket_id", None)
     context.user_data.pop("admin_recording_subscription_messages", None)
     context.user_data.pop("client_waiting_subscribe_months", None)
@@ -2801,7 +2866,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not topup or int(topup["user_id"]) != user.id or str(topup["status"]) != "pending":
             await query.message.reply_text("Заявка на пополнение не найдена или уже обработана.")
             return
-        for admin_id in get_admin_ids():
+        for admin_id in get_admin_ids_for_notification("payments"):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -3035,7 +3100,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text="Клиент нажал кнопку «Платёж выполнен» по оформлению подписки",
             user_id=user.id,
         )
-        for admin_id in get_admin_ids():
+        for admin_id in get_admin_ids_for_notification("payments"):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -3057,6 +3122,64 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not is_admin(user.id):
         await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    if action == "adminsettings":
+        if not is_super_admin(user.id):
+            await query.message.reply_text("Настройка администраторов доступна только главному администратору.")
+            return
+        if value == "list":
+            await query.message.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
+            return
+        if value == "add":
+            context.user_data["admin_waiting_new_admin"] = True
+            await query.message.reply_text(
+                "Отправьте Telegram ID нового администратора одним сообщением.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Отмена", callback_data="adminsettings:canceladd")]]),
+            )
+            return
+        if value == "canceladd":
+            context.user_data.pop("admin_waiting_new_admin", None)
+            await query.message.reply_text("Добавление администратора отменено.", reply_markup=admin_management_keyboard())
+            return
+        try:
+            target_admin_id = int(value)
+        except ValueError:
+            return
+        if not is_admin(target_admin_id):
+            await query.message.reply_text("Администратор не найден.", reply_markup=admin_management_keyboard())
+            return
+        await send_admin_notification_settings(query.message, target_admin_id)
+        return
+
+    if action == "admintoggle":
+        if not is_super_admin(user.id):
+            await query.message.reply_text("Настройка уведомлений доступна только главному администратору.")
+            return
+        try:
+            target_raw, notification_type = value.split(":", 1)
+            target_admin_id = int(target_raw)
+        except ValueError:
+            return
+        settings = get_admin_notification_settings(target_admin_id)
+        if notification_type not in settings or not set_admin_notification_setting(target_admin_id, notification_type, not settings[notification_type]):
+            await query.message.reply_text("Не удалось изменить настройку уведомлений.")
+            return
+        await send_admin_notification_settings(query.message, target_admin_id)
+        return
+
+    if action == "adminremove":
+        if not is_super_admin(user.id):
+            await query.message.reply_text("Удалять администраторов может только главный администратор.")
+            return
+        try:
+            target_admin_id = int(value)
+        except ValueError:
+            return
+        if not remove_admin(target_admin_id):
+            await query.message.reply_text("Нельзя удалить главного администратора или администратор уже удалён.")
+            return
+        await query.message.reply_text(f"Администратор {target_admin_id} удалён.", reply_markup=admin_management_keyboard())
         return
 
     if action == "userlink":

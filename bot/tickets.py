@@ -1057,6 +1057,7 @@ ADMIN_BUTTON_TICKETS_GROUP = "💬 Обращения"
 ADMIN_BUTTON_XUI_GROUP = "🖥 3x-ui"
 ADMIN_BUTTON_CLIENTS_GROUP = "👥 Клиенты"
 ADMIN_BUTTON_SERVICE_GROUP = "⚙️ Сервис"
+ADMIN_BUTTON_ADMIN_SETTINGS = "👑 Админы и уведомления"
 ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
 
@@ -1105,7 +1106,7 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def admin_section_keyboard(section: str) -> ReplyKeyboardMarkup:
+def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     sections = {
         "requests": [[ADMIN_BUTTON_RENEW_REQUESTS, ADMIN_BUTTON_SUBSCRIPTION_REQUESTS], [ADMIN_BUTTON_TOPUPS]],
         "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY]],
@@ -1113,7 +1114,10 @@ def admin_section_keyboard(section: str) -> ReplyKeyboardMarkup:
         "clients": [[ADMIN_BUTTON_USERS, ADMIN_BUTTON_CLIENTS]],
         "service": [[ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS], [ADMIN_BUTTON_STATS, ADMIN_BUTTON_HELP]],
     }
-    return ReplyKeyboardMarkup(sections.get(section, []) + [[ADMIN_BUTTON_BACK]], resize_keyboard=True)
+    buttons = list(sections.get(section, []))
+    if section == "service" and is_super_admin(user_id):
+        buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
+    return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True)
 
 
 def message_type(message) -> str:
