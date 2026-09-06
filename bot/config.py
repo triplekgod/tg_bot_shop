@@ -134,6 +134,9 @@ STARS_INVOICE_DESCRIPTION = os.getenv("STARS_INVOICE_DESCRIPTION", "Оплата
 BALANCE_PRICE_PER_MONTH = max(1, int(os.getenv("BALANCE_PRICE_PER_MONTH", "250") or 250))
 BALANCE_MIN_TOPUP_RUB = max(1, int(os.getenv("BALANCE_MIN_TOPUP_RUB", "1") or 1))
 BALANCE_MAX_TOPUP_RUB = max(BALANCE_MIN_TOPUP_RUB, int(os.getenv("BALANCE_MAX_TOPUP_RUB", "100000") or 100000))
+# Криптопополнение оставлено в коде, но по умолчанию скрыто из клиентского меню.
+# Укажите true, чтобы вернуть кнопку без изменения кода.
+CRYPTO_TOPUP_ENABLED = os.getenv("CRYPTO_TOPUP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "да"}
 REFERRAL_PERCENT = max(0, min(100, int(os.getenv("REFERRAL_PERCENT", "25") or 25)))
 
 

@@ -931,9 +931,12 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
 
     if text == CLIENT_BUTTON_BALANCE:
         context.user_data.pop("balance_topup_method", None)
+        topup_note = "Пополнение P2P проверяет администратор."
+        if CRYPTO_TOPUP_ENABLED:
+            topup_note = "Пополнение P2P и криптовалютой проверяет администратор."
         await message.reply_text(
             f"💰 Ваш баланс: <b>{balance_of(user.id)} ₽</b>\n\n"
-            "Пополнение P2P и криптовалютой проверяет администратор. После зачисления выберите срок подписки и оплатите её с баланса.",
+            f"{topup_note} После зачисления выберите срок подписки и оплатите её с баланса.",
             parse_mode=ParseMode.HTML,
             reply_markup=balance_keyboard(),
         )
@@ -2758,6 +2761,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "balance":
         if value not in {"p2p", "crypto"}:
+            return
+        if value == "crypto" and not CRYPTO_TOPUP_ENABLED:
+            await query.message.reply_text("Криптопополнение сейчас отключено.")
             return
         context.user_data["balance_topup_method"] = value
         await query.message.reply_text(
