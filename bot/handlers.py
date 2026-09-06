@@ -86,6 +86,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/linksub USER_ID EMAIL — привязать Telegram-пользователя к клиенту 3x-ui\n"
             "/renewuser USER_ID DAYS [TICKET_ID] — продлить привязанную подписку\n"
             "/unlinksub USER_ID — удалить привязку\n"
+            "/setbalance USER_ID СУММА — установить баланс в рублях\n"
+            "/setreferrer USER_ID REFERRER_ID — изменить реферала, 0 — удалить\n"
             "/id — узнать свой Telegram ID"
         )
     else:
@@ -119,7 +121,7 @@ async def notify_admins_about_user_message(
     elif message.caption:
         header += f"\n\nПодпись:\n{html.escape(message.caption)}"
 
-    for admin_id in get_admin_ids():
+    async def deliver(admin_id: int) -> None:
         try:
             sent_header = await context.bot.send_message(
                 chat_id=admin_id,
@@ -138,6 +140,7 @@ async def notify_admins_about_user_message(
                 save_admin_message_map(admin_id, copied.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить обращение админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
 
 
 async def notify_admins_about_renew_request(
@@ -193,7 +196,7 @@ async def notify_admins_about_renew_request(
         "Админ видит выбранный клиентом способ оплаты в карточке заявки."
     )
 
-    for admin_id in get_admin_ids():
+    async def deliver(admin_id: int) -> None:
         try:
             sent_header = await context.bot.send_message(
                 chat_id=admin_id,
@@ -204,6 +207,7 @@ async def notify_admins_about_renew_request(
             save_admin_message_map(admin_id, sent_header.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить заявку на продление админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
 
 
 async def notify_admins_about_payment_done(
@@ -237,7 +241,7 @@ async def notify_admins_about_payment_done(
         f"{tail}"
     )
 
-    for admin_id in get_admin_ids():
+    async def deliver(admin_id: int) -> None:
         try:
             sent = await context.bot.send_message(
                 chat_id=admin_id,
@@ -248,6 +252,7 @@ async def notify_admins_about_payment_done(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user_id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить подтверждение оплаты админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
 
 
 async def send_stars_invoice_to_client(
@@ -319,7 +324,7 @@ async def process_client_renewal_payment_choice(
             )
             return
         if balance_of(user.id) < cost:
-            await message.reply_text(f"Недостаточно средств: нужно {cost} ⭐, доступно {balance_of(user.id)} ⭐. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
+            await message.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
             return
         try:
             async with XuiClient() as api:
@@ -330,7 +335,7 @@ async def process_client_renewal_payment_choice(
         if not spend_balance(user.id, cost, f"Продление на {months} мес."):
             await message.reply_text("Баланс изменился, средств уже недостаточно. Проверьте его и повторите попытку.", reply_markup=client_main_keyboard())
             return
-        await message.reply_text(f"✅ Подписка продлена на {renew_days} дн. Списано {cost} ⭐. Остаток: {balance_of(user.id)} ⭐.", reply_markup=client_main_keyboard())
+        await message.reply_text(f"✅ Подписка продлена на {renew_days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.", reply_markup=client_main_keyboard())
         return
 
     method = "stars" if method == "stars" else "manual"
@@ -386,7 +391,7 @@ async def notify_admins_about_auto_stars_renewal(
         "Подписка была продлена автоматически.\n\n"
         f"{format_renew_success_admin_text(result, days, ticket_id)}"
     )
-    for admin_id in get_admin_ids():
+    async def deliver(admin_id: int) -> None:
         try:
             sent = await context.bot.send_message(
                 chat_id=admin_id,
@@ -397,6 +402,7 @@ async def notify_admins_about_auto_stars_renewal(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user_id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить уведомление об автопродлении админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
 
 
 async def notify_admins_about_stars_auto_error(
@@ -506,7 +512,7 @@ async def notify_admins_about_subscription_request(
         f"Email нового клиента: <code>{html.escape(xui_email)}</code>\n\n"
         f"{hint}"
     )
-    for admin_id in get_admin_ids():
+    async def deliver(admin_id: int) -> None:
         try:
             sent = await context.bot.send_message(
                 chat_id=admin_id,
@@ -517,6 +523,7 @@ async def notify_admins_about_subscription_request(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user.id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить заявку на оформление админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids()))
 
 
 async def send_subscription_stars_invoice_to_client(
@@ -579,7 +586,7 @@ async def process_client_subscription_payment_choice(
     if method == "balance":
         cost = months * BALANCE_PRICE_PER_MONTH
         if balance_of(user.id) < cost:
-            await message.reply_text(f"Недостаточно средств: нужно {cost} ⭐, доступно {balance_of(user.id)} ⭐. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
+            await message.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
             return
         try:
             async with XuiClient() as api:
@@ -593,7 +600,7 @@ async def process_client_subscription_payment_choice(
         set_xui_link(user.id, str(result.get("email") or email))
         link = build_subscription_link(result)
         link_text = f"\nСсылка подписки: {link}" if link else ""
-        await message.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ⭐. Остаток: {balance_of(user.id)} ⭐.{link_text}", reply_markup=client_main_keyboard())
+        await message.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}", reply_markup=client_main_keyboard())
         return
 
     method = "stars" if method == "stars" else "manual"
@@ -925,7 +932,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if text == CLIENT_BUTTON_BALANCE:
         context.user_data.pop("balance_topup_method", None)
         await message.reply_text(
-            f"💰 Ваш баланс: <b>{balance_of(user.id)} ⭐</b>\n\n"
+            f"💰 Ваш баланс: <b>{balance_of(user.id)} ₽</b>\n\n"
             "Пополнение P2P и криптовалютой проверяет администратор. После зачисления выберите срок подписки и оплатите её с баланса.",
             parse_mode=ParseMode.HTML,
             reply_markup=balance_keyboard(),
@@ -938,7 +945,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         link = f"https://t.me/{bot_username}?start=ref_{user.id}" if bot_username else f"ref_{user.id}"
         await message.reply_text(
             f"👥 Реферальная программа\n\nВаша ссылка:\n<code>{html.escape(link)}</code>\n\n"
-            f"Рефералов: <b>{count}</b>\nЗаработано: <b>{earned} ⭐</b>\n\n"
+            f"Рефералов: <b>{count}</b>\nЗаработано: <b>{earned} ₽</b>\n\n"
             f"Вы получаете {REFERRAL_PERCENT}% с каждого подтверждённого пополнения реферала. Вознаграждение автоматически поступает на баланс.",
             parse_mode=ParseMode.HTML,
             reply_markup=client_main_keyboard(),
@@ -956,25 +963,30 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         )
         return True
 
-    if text == CLIENT_BUTTON_RENEW:
-        context.user_data["client_waiting_renew_months"] = True
-        context.user_data.pop("client_waiting_subscribe_months", None)
-        context.user_data.pop("client_waiting_ticket_text", None)
+    if text == CLIENT_BUTTON_SUBSCRIPTION:
+        xui_email, _ = await resolve_xui_email_for_user(user.id)
+        if not xui_email:
+            await message.reply_text(
+                "📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить подписку", callback_data="subscription:buy")]]),
+            )
+            return True
+        try:
+            async with XuiClient() as api:
+                summary = await api.get_client_summary(xui_email)
+        except XuiApiError as exc:
+            await message.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
+            return True
+        if not summary:
+            await message.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
+            return True
+        link = build_subscription_link(summary)
+        expiry = format_xui_datetime(safe_int(summary.get("expiry_ms")))
+        link_line = f"\n\n🔗 Ваша ссылка подписки:\n{link}" if link else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
         await message.reply_text(
-            "На сколько месяцев хотите продлить подписку?\n\n"
-            "Напишите число, например: 1, 3, 6 или 12.",
-            reply_markup=client_main_keyboard(),
-        )
-        return True
-
-    if text == CLIENT_BUTTON_SUBSCRIBE:
-        context.user_data["client_waiting_subscribe_months"] = True
-        context.user_data.pop("client_waiting_renew_months", None)
-        context.user_data.pop("client_waiting_ticket_text", None)
-        await message.reply_text(
-            "На сколько месяцев хотите оформить подписку?\n\n"
-            "Напишите число, например: 1, 3, 6 или 12.",
-            reply_markup=client_main_keyboard(),
+            f"📄 Ваша подписка\nEmail: <code>{html.escape(xui_email)}</code>\nДействует до: <b>{html.escape(expiry)}</b>{link_line}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Продлить подписку", callback_data="subscription:renew")]]),
         )
         return True
 
@@ -1002,32 +1014,40 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
             amount = int(text)
         except ValueError:
             amount = 0
-        if amount < STARS_MIN_AMOUNT or amount > STARS_MAX_AMOUNT:
-            await message.reply_text(f"Введите целое число от {STARS_MIN_AMOUNT} до {STARS_MAX_AMOUNT}.")
+        if amount < BALANCE_MIN_TOPUP_RUB or amount > BALANCE_MAX_TOPUP_RUB:
+            await message.reply_text(f"Введите целую сумму от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB} ₽.")
             return True
         method = str(context.user_data.pop("balance_topup_method"))
         topup_id = create_balance_topup(user.id, amount, method)
-        if method == "stars":
-            try:
-                await context.bot.send_invoice(chat_id=user.id, title="Пополнение баланса", description=f"Зачисление {amount} ⭐ на внутренний баланс", payload=f"balance:{topup_id}:{amount}", provider_token="", currency="XTR", prices=[LabeledPrice(label="Пополнение баланса", amount=amount)])
-            except TelegramError:
-                await message.reply_text("Не удалось отправить счёт Stars. Повторите попытку позднее.")
-            return True
         details = CRYPTO_PAYMENT_DETAILS if method == "crypto" else "Администратор пришлёт реквизиты P2P в этом чате."
         if method == "p2p":
             for admin_id in get_admin_ids():
                 try:
                     await context.bot.send_message(
                         chat_id=admin_id,
-                        text=f"💳 Новая P2P-заявка на пополнение #{topup_id}: пользователь {user.id}, сумма {amount} ⭐. Отправьте ему реквизиты через обычный ответ.",
+                        text=f"💳 Новая P2P-заявка на пополнение #{topup_id}: пользователь {user.id}, сумма {amount} ₽. Проверьте перевод и нажмите «Подтвердить», когда деньги поступят. Реквизиты можно отправить клиенту обычным ответом.",
+                        reply_markup=balance_topup_confirm_keyboard(topup_id),
                     )
                 except TelegramError:
                     pass
         await message.reply_text(
-            f"Заявка на пополнение #{topup_id}: <b>{amount} ⭐</b>.\n\n{html.escape(details or 'Криптореквизиты ещё не настроены. Администратор свяжется с вами.')}\n\nПосле перевода нажмите кнопку ниже.",
+            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n{html.escape(details or 'Криптореквизиты ещё не настроены. Администратор свяжется с вами.')}\n\nПосле перевода нажмите кнопку ниже.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Я перевёл", callback_data=f"topuppaid:{topup_id}")]]),
         )
+        return True
+
+    if context.user_data.get("client_waiting_stars_months"):
+        months = parse_months_from_text(text)
+        if months is None:
+            await message.reply_text(f"Укажите число от 1 до {XUI_MAX_RENEW_MONTHS}.")
+            return True
+        context.user_data.pop("client_waiting_stars_months", None)
+        xui_email, _ = await resolve_xui_email_for_user(user.id)
+        if xui_email:
+            await process_client_renewal_payment_choice(update, context, months, "stars")
+        else:
+            await process_client_subscription_payment_choice(update, context, months, "stars")
         return True
 
     if context.user_data.get("client_waiting_subscribe_months"):
@@ -1855,8 +1875,18 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT user_id, username, first_name, last_name, is_banned, updated_at
-            FROM users
+            SELECT u.user_id, u.username, u.first_name, u.last_name, u.is_banned, u.updated_at,
+                   COALESCE(b.balance, 0) AS balance,
+                   COALESCE(rc.referrals_count, 0) AS referrals_count,
+                   r.referrer_user_id
+            FROM users u
+            LEFT JOIN (
+                SELECT user_id, SUM(amount) AS balance FROM balance_transactions GROUP BY user_id
+            ) b ON b.user_id = u.user_id
+            LEFT JOIN (
+                SELECT referrer_user_id, COUNT(*) AS referrals_count FROM referrals GROUP BY referrer_user_id
+            ) rc ON rc.referrer_user_id = u.user_id
+            LEFT JOIN referrals r ON r.referral_user_id = u.user_id
             ORDER BY updated_at DESC
             LIMIT 20
             """
@@ -1865,13 +1895,46 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Пользователей пока нет.")
         return
 
-    lines = ["Последние пользователи:"]
+    lines = ["Последние пользователи (до 20):"]
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
         username = f"@{row['username']}" if row["username"] else "без username"
         banned = " 🚫" if row["is_banned"] else ""
-        lines.append(f"{row['user_id']} — {name} ({username}){banned}")
+        referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
+        lines.append(f"{row['user_id']} — {name} ({username}){banned}\n  Баланс: {row['balance']} ₽; рефералов: {row['referrals_count']}{referrer}")
     await update.message.reply_text("\n".join(lines))
+
+
+@require_admin
+async def setbalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or len(context.args) != 2:
+        await update.message.reply_text("Использование: /setbalance USER_ID СУММА_В_РУБЛЯХ")
+        return
+    try:
+        target_user_id, amount = int(context.args[0]), int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("USER_ID и сумма должны быть целыми числами.")
+        return
+    if not set_balance(target_user_id, amount, update.effective_user.id):
+        await update.message.reply_text("Не удалось изменить баланс: пользователь не найден или указана отрицательная сумма.")
+        return
+    await update.message.reply_text(f"Баланс пользователя {target_user_id}: {balance_of(target_user_id)} ₽.")
+
+
+@require_admin
+async def setreferrer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or len(context.args) != 2:
+        await update.message.reply_text("Использование: /setreferrer USER_ID REFERRER_ID\nДля удаления: /setreferrer USER_ID 0")
+        return
+    try:
+        user_id, referrer_id = int(context.args[0]), int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("USER_ID и REFERRER_ID должны быть числами.")
+        return
+    if not get_user(user_id) or not replace_referrer(user_id, None if referrer_id == 0 else referrer_id):
+        await update.message.reply_text("Не удалось изменить реферала: проверьте оба USER_ID, они не должны совпадать.")
+        return
+    await update.message.reply_text("Реферальная привязка обновлена.")
 
 
 @require_admin
@@ -2565,11 +2628,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if action == "balance":
-        if value not in {"stars", "p2p", "crypto"}:
+        if value not in {"p2p", "crypto"}:
             return
         context.user_data["balance_topup_method"] = value
         await query.message.reply_text(
-            f"Введите сумму пополнения в ⭐ (от {STARS_MIN_AMOUNT} до {STARS_MAX_AMOUNT}).\n"
+            f"Введите сумму пополнения в ₽ (от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB}).\n"
             "Эта сумма будет зачислена на внутренний баланс после оплаты/подтверждения.",
             reply_markup=client_main_keyboard(),
         )
@@ -2588,7 +2651,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"💰 Пользователь {user.id} подтвердил {topup['method'].upper()}-перевод по пополнению #{topup_id}: {topup['amount']} ⭐.",
+                    text=f"💰 Пользователь {user.id} подтвердил {topup['method'].upper()}-перевод по пополнению #{topup_id}: {topup['amount']} ₽.",
                     reply_markup=balance_topup_confirm_keyboard(topup_id),
                 )
             except TelegramError:
@@ -2596,8 +2659,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("Подтверждение передано администратору. Баланс будет зачислен после проверки.", reply_markup=client_main_keyboard())
         return
 
+    if action == "topupcancel":
+        try:
+            topup_id = int(value)
+        except ValueError:
+            return
+        topup = get_balance_topup(topup_id)
+        if not topup:
+            await query.message.reply_text("Заявка на пополнение не найдена.")
+            return
+        # Клиент может отменить только свою заявку, администратор — любую.
+        if not is_admin(user.id) and int(topup["user_id"]) != user.id:
+            await query.message.reply_text("Эта заявка вам не принадлежит.")
+            return
+        cancelled = cancel_balance_topup(topup_id)
+        if not cancelled:
+            await query.message.reply_text("Заявка уже обработана и не может быть отменена.")
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        if is_admin(user.id):
+            try:
+                await context.bot.send_message(chat_id=int(cancelled["user_id"]), text=f"❌ Пополнение #{topup_id} отменено администратором. Баланс не изменён.", reply_markup=client_main_keyboard())
+            except TelegramError:
+                pass
+        await query.message.reply_text(f"Пополнение #{topup_id} отменено. Баланс не изменён.", reply_markup=admin_main_keyboard() if is_admin(user.id) else client_main_keyboard())
+        return
+
     if action == "topupconfirm":
         if not is_admin(user.id):
+            await query.message.reply_text("Подтверждать пополнения могут только администраторы.")
             return
         try:
             topup_id = int(value)
@@ -2608,10 +2701,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Это пополнение уже обработано или не найдено.")
             return
         try:
-            await context.bot.send_message(chat_id=int(topup["user_id"]), text=f"✅ Баланс пополнен на {topup['amount']} ⭐. Текущий баланс: {balance_of(int(topup['user_id']))} ⭐.", reply_markup=client_main_keyboard())
+            await context.bot.send_message(chat_id=int(topup["user_id"]), text=f"✅ Баланс пополнен на {topup['amount']} ₽. Текущий баланс: {balance_of(int(topup['user_id']))} ₽.", reply_markup=client_main_keyboard())
         except TelegramError:
             pass
         await query.message.reply_text(f"Пополнение #{topup_id} зачислено. Реферальная награда (если есть) начислена автоматически.")
+        return
+
+    if action == "subscription":
+        if value == "renew":
+            context.user_data["client_waiting_renew_months"] = True
+            await query.message.reply_text(f"На сколько месяцев хотите продлить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+        elif value == "buy":
+            context.user_data["client_waiting_subscribe_months"] = True
+            await query.message.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+        return
+
+    if action == "starsbuy":
+        context.user_data["client_waiting_stars_months"] = True
+        await query.message.reply_text(f"На сколько месяцев купить/продлить подписку за Stars?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
         return
 
     if action == "renewpay":
@@ -3280,12 +3387,19 @@ async def post_init(application: Application) -> None:
         ("clients", "список клиентов 3x-ui"),
         ("inbounds", "список inbound 3x-ui"),
         ("subinfo", "информация о клиенте 3x-ui"),
+        ("setbalance", "установить баланс пользователя"),
+        ("setreferrer", "изменить реферала пользователя"),
     ]
     for admin_id in get_admin_ids():
         try:
             await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramError as exc:
             logger.warning("Не удалось установить команды для админа %s: %s", admin_id, exc)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Не позволяет ошибкам обработчика исчезать в стандартном сообщении PTB."""
+    logger.exception("Необработанная ошибка при обработке update %r", update, exc_info=context.error)
 
 def build_app() -> Application:
     if not BOT_TOKEN:
@@ -3312,6 +3426,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("setbalance", setbalance_command))
+    application.add_handler(CommandHandler("setreferrer", setreferrer_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("xui_status", xui_status_command))
     application.add_handler(CommandHandler("clients", clients_command))
@@ -3332,6 +3448,7 @@ def build_app() -> Application:
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, route_message))
+    application.add_error_handler(error_handler)
 
     return application
 

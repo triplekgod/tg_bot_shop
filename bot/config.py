@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -129,10 +130,10 @@ STARS_PRICE_PER_MONTH = max(0, int(os.getenv("STARS_PRICE_PER_MONTH", "250") or 
 STARS_INVOICE_TITLE = os.getenv("STARS_INVOICE_TITLE", "Продление подписки").strip() or "Продление подписки"
 STARS_INVOICE_DESCRIPTION = os.getenv("STARS_INVOICE_DESCRIPTION", "Оплата продления подписки через Telegram Stars").strip() or "Оплата продления подписки через Telegram Stars"
 
-# Внутренний баланс хранится в целых Stars-эквивалентах. Так пользователь может
-# оплатить подписку накопленными средствами, а 25% реферального вознаграждения
-# начисляется без конвертации валют.
-BALANCE_PRICE_PER_MONTH = max(1, int(os.getenv("BALANCE_PRICE_PER_MONTH", str(STARS_PRICE_PER_MONTH or 250)) or 250))
+# Внутренний баланс и вознаграждение рефералам хранятся в целых рублях.
+BALANCE_PRICE_PER_MONTH = max(1, int(os.getenv("BALANCE_PRICE_PER_MONTH", "250") or 250))
+BALANCE_MIN_TOPUP_RUB = max(1, int(os.getenv("BALANCE_MIN_TOPUP_RUB", "1") or 1))
+BALANCE_MAX_TOPUP_RUB = max(BALANCE_MIN_TOPUP_RUB, int(os.getenv("BALANCE_MAX_TOPUP_RUB", "100000") or 100000))
 REFERRAL_PERCENT = max(0, min(100, int(os.getenv("REFERRAL_PERCENT", "25") or 25)))
 CRYPTO_PAYMENT_DETAILS = os.getenv("CRYPTO_PAYMENT_DETAILS", "").strip()
 

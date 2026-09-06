@@ -1032,8 +1032,7 @@ def should_show_subscription_payment_done_button(ticket_id: int) -> bool:
     )
 
 
-CLIENT_BUTTON_SUBSCRIBE = "🆕 Оформить подписку"
-CLIENT_BUTTON_RENEW = "🔄 Продлить подписку"
+CLIENT_BUTTON_SUBSCRIPTION = "📄 Подписка"
 CLIENT_BUTTON_BALANCE = "💰 Баланс"
 CLIENT_BUTTON_REFERRALS = "👥 Рефералы"
 CLIENT_BUTTON_TICKET = "🆘 Обращение"
@@ -1056,7 +1055,7 @@ ADMIN_BUTTON_HELP = "ℹ️ Помощь"
 
 def client_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[CLIENT_BUTTON_SUBSCRIBE, CLIENT_BUTTON_RENEW], [CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS], [CLIENT_BUTTON_TICKET]],
+        [[CLIENT_BUTTON_SUBSCRIPTION], [CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS], [CLIENT_BUTTON_TICKET]],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
     )
@@ -1064,14 +1063,17 @@ def client_main_keyboard() -> ReplyKeyboardMarkup:
 
 def balance_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ Пополнить Stars", callback_data="balance:stars")],
         [InlineKeyboardButton("💳 Пополнить P2P", callback_data="balance:p2p")],
         [InlineKeyboardButton("₿ Пополнить криптовалютой", callback_data="balance:crypto")],
+        [InlineKeyboardButton("⭐ Купить подписку за Stars", callback_data="starsbuy:start")],
     ])
 
 
 def balance_topup_confirm_keyboard(topup_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Подтвердить и зачислить", callback_data=f"topupconfirm:{topup_id}")]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Подтвердить и зачислить", callback_data=f"topupconfirm:{topup_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"topupcancel:{topup_id}"),
+    ]])
 
 
 def admin_main_keyboard() -> ReplyKeyboardMarkup:

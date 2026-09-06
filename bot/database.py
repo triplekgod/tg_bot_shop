@@ -296,6 +296,24 @@ def set_referrer(referral_user_id: int, referrer_user_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def replace_referrer(referral_user_id: int, referrer_user_id: Optional[int]) -> bool:
+    """Админская правка привязки реферала; None полностью снимает её."""
+    if referrer_user_id is not None and referral_user_id == referrer_user_id:
+        return False
+    with db() as conn:
+        if referrer_user_id is None:
+            conn.execute("DELETE FROM referrals WHERE referral_user_id = ?", (referral_user_id,))
+            return True
+        if not conn.execute("SELECT 1 FROM users WHERE user_id = ?", (referrer_user_id,)).fetchone():
+            return False
+        conn.execute(
+            "INSERT INTO referrals(referral_user_id, referrer_user_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(referral_user_id) DO UPDATE SET referrer_user_id = excluded.referrer_user_id, created_at = excluded.created_at",
+            (referral_user_id, referrer_user_id, now_iso()),
+        )
+    return True
+
+
 def referral_stats(user_id: int) -> tuple[int, int]:
     with db() as conn:
         referrals = conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_user_id = ?", (user_id,)).fetchone()[0]
@@ -312,6 +330,17 @@ def balance_of(user_id: int) -> int:
 def add_balance_transaction(user_id: int, amount: int, kind: str, note: str = "") -> None:
     with db() as conn:
         conn.execute("INSERT INTO balance_transactions(user_id, amount, kind, note, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, amount, kind, note, now_iso()))
+
+
+def set_balance(user_id: int, target_amount: int, admin_id: int) -> bool:
+    """Выставляет итоговый баланс через прозрачную корректирующую операцию."""
+    if target_amount < 0 or not get_user(user_id):
+        return False
+    current = balance_of(user_id)
+    delta = target_amount - current
+    if delta:
+        add_balance_transaction(user_id, delta, "admin_adjustment", f"Корректировка администратором {admin_id}")
+    return True
 
 
 def spend_balance(user_id: int, amount: int, note: str) -> bool:
@@ -347,6 +376,16 @@ def confirm_balance_topup(topup_id: int, admin_id: int, charge_id: str = "") -> 
             reward = int(int(topup["amount"]) * REFERRAL_PERCENT / 100)
             if reward:
                 conn.execute("INSERT INTO balance_transactions(user_id, amount, kind, note, created_at) VALUES (?, ?, 'referral_reward', ?, ?)", (ref["referrer_user_id"], reward, f"{REFERRAL_PERCENT}% с пополнения реферала #{topup_id}", now_iso()))
+    return topup
+
+
+def cancel_balance_topup(topup_id: int) -> Optional[sqlite3.Row]:
+    """Отменяет только ещё не подтверждённое пополнение без движения средств."""
+    with db() as conn:
+        topup = conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)).fetchone()
+        if not topup or str(topup["status"]) != "pending":
+            return None
+        conn.execute("UPDATE balance_topups SET status = 'cancelled' WHERE id = ?", (topup_id,))
     return topup
 
 
