@@ -176,6 +176,23 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS trial_subscriptions (
+                user_id INTEGER PRIMARY KEY,
+                xui_email TEXT NOT NULL,
+                subscription_link TEXT,
+                expires_at_ms INTEGER,
+                status TEXT NOT NULL DEFAULT 'creating',
+                created_at TEXT NOT NULL,
+                activated_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         # Миграция для уже созданных баз: старые версии бота могли создать
@@ -282,6 +299,71 @@ def remove_admin(admin_id: int) -> bool:
         conn.execute("DELETE FROM admin_notification_settings WHERE admin_id = ?", (admin_id,))
         cur = conn.execute("DELETE FROM admins WHERE user_id = ?", (admin_id,))
     return cur.rowcount > 0
+
+
+def get_trial_subscription(user_id: int) -> Optional[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM trial_subscriptions WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+
+def claim_trial_subscription(user_id: int, xui_email: str) -> bool:
+    """Зарезервировать единственную пробную подписку до вызова 3x-ui."""
+    with db() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO trial_subscriptions(user_id, xui_email, status, created_at)
+                VALUES (?, ?, 'creating', ?)
+                """,
+                (user_id, xui_email, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            return False
+    return True
+
+
+def activate_trial_subscription(user_id: int, subscription_link: Optional[str], expires_at_ms: int) -> bool:
+    with db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE trial_subscriptions
+            SET subscription_link = ?, expires_at_ms = ?, status = 'active', activated_at = ?
+            WHERE user_id = ? AND status = 'creating'
+            """,
+            (subscription_link, expires_at_ms or None, now_iso(), user_id),
+        )
+    return cur.rowcount > 0
+
+
+def release_trial_subscription_claim(user_id: int) -> None:
+    """Разрешить повтор после ошибки до создания клиента в панели."""
+    with db() as conn:
+        conn.execute("DELETE FROM trial_subscriptions WHERE user_id = ? AND status = 'creating'", (user_id,))
+
+
+def trial_subscriptions_enabled() -> bool:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key = 'trial_subscriptions_enabled'"
+        ).fetchone()
+    # Для обратной совместимости до первого изменения пробные подписки включены.
+    return not row or str(row["setting_value"]).strip().lower() in {"1", "true", "yes", "да"}
+
+
+def set_trial_subscriptions_enabled(enabled: bool) -> None:
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO bot_settings(setting_key, setting_value, updated_at)
+            VALUES ('trial_subscriptions_enabled', ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value, updated_at = excluded.updated_at
+            """,
+            ("true" if enabled else "false", now_iso()),
+        )
 
 
 def is_admin(user_id: Optional[int]) -> bool:

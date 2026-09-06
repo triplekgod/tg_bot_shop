@@ -1058,6 +1058,7 @@ ADMIN_BUTTON_XUI_GROUP = "🖥 3x-ui"
 ADMIN_BUTTON_CLIENTS_GROUP = "👥 Клиенты"
 ADMIN_BUTTON_SERVICE_GROUP = "⚙️ Сервис"
 ADMIN_BUTTON_ADMIN_SETTINGS = "👑 Админы и уведомления"
+ADMIN_BUTTON_TRIAL_SETTINGS = "🎁 Пробные подписки"
 ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
 
@@ -1074,6 +1075,13 @@ def balance_keyboard() -> InlineKeyboardMarkup:
     if CRYPTO_TOPUP_ENABLED:
         buttons.append([InlineKeyboardButton("₿ Пополнить криптовалютой", callback_data="balance:crypto")])
     buttons.append([InlineKeyboardButton("⭐ Купить подписку за Stars", callback_data="starsbuy:start")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def subscription_purchase_keyboard(trial_available: bool) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton("🛒 Купить подписку", callback_data="subscription:buy")]]
+    if trial_available:
+        buttons.append([InlineKeyboardButton("🎁 Получить тест на 1 день", callback_data="subscription:trial")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1115,6 +1123,8 @@ def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> Reply
         "service": [[ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS], [ADMIN_BUTTON_STATS, ADMIN_BUTTON_HELP]],
     }
     buttons = list(sections.get(section, []))
+    if section == "service":
+        buttons.append([ADMIN_BUTTON_TRIAL_SETTINGS])
     if section == "service" and is_super_admin(user_id):
         buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
     return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True)

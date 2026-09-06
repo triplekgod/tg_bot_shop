@@ -644,6 +644,98 @@ async def process_client_subscription_payment_choice(
     )
 
 
+def trial_profile_url(user) -> str:
+    username = (getattr(user, "username", None) or "").strip().lstrip("@")
+    return f"https://t.me/{quote(username, safe='')}" if username else f"tg://user?id={user.id}"
+
+
+async def notify_admins_about_trial_subscription(context: ContextTypes.DEFAULT_TYPE, user, email: str, link: Optional[str]) -> None:
+    username = f"@{user.username}" if user.username else "без username"
+    profile_url = trial_profile_url(user)
+    link_line = f"\nСсылка подписки: <code>{html.escape(link)}</code>" if link else "\nСсылка подписки: ⚠️ не получена из панели"
+    text = (
+        "🎁 Выдана тестовая подписка на 1 день\n\n"
+        f"Пользователь: <a href=\"{html.escape(profile_url, quote=True)}\">{html.escape(username)}</a>\n"
+        f"Telegram ID: <code>{user.id}</code>\n"
+        f"Email 3x-ui: <code>{html.escape(email)}</code>"
+        f"{link_line}"
+    )
+
+    async def deliver(admin_id: int) -> None:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML)
+        except TelegramError as exc:
+            logger.warning("Не удалось уведомить админа %s о тестовой подписке: %s", admin_id, exc)
+
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("requests")))
+
+
+async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
+    if not trial_subscriptions_enabled():
+        await message.reply_text("Пробные подписки сейчас отключены.", reply_markup=client_main_keyboard())
+        return
+
+    existing = get_trial_subscription(user.id)
+    if existing:
+        expires_ms = safe_int(existing["expires_at_ms"])
+        link = str(existing["subscription_link"] or "").strip()
+        if str(existing["status"]) == "active" and expires_ms > int(time.time() * 1000):
+            link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Ссылка не была получена из панели. Обратитесь в поддержку."
+            await message.reply_text(
+                f"🎁 Тестовая подписка уже была выдана и действует до <b>{html.escape(format_xui_datetime(expires_ms))}</b>."
+                f"{link_line}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=client_main_keyboard(),
+            )
+        elif str(existing["status"]) == "creating":
+            await message.reply_text("Тестовая подписка уже создаётся. Подождите немного и откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
+        else:
+            await message.reply_text("Вы уже использовали тестовую подписку. Вы можете купить новую подписку.", reply_markup=subscription_purchase_keyboard(False))
+        return
+
+    linked_email, _ = await resolve_xui_email_for_user(user.id)
+    if linked_email:
+        await message.reply_text("У вас уже есть привязанная подписка. Тестовая подписка доступна только до первой подписки.", reply_markup=client_main_keyboard())
+        return
+
+    email = generate_subscription_email(user.id, f"trial_{user.username or user.id}")
+    if not claim_trial_subscription(user.id, email):
+        await message.reply_text("Тестовая подписка уже была запрошена. Откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
+        return
+
+    try:
+        async with XuiClient() as api:
+            result = await api.add_client(email, 1, user.id)
+            created_email = str(result.get("email") or email)
+            try:
+                summary = await api.get_client_summary(created_email)
+            except XuiApiError:
+                summary = None
+    except XuiApiError as exc:
+        release_trial_subscription_claim(user.id)
+        await message.reply_text(f"Не удалось создать тестовую подписку: {exc}. Попробуйте позже.", reply_markup=client_main_keyboard())
+        return
+
+    link = build_subscription_link(summary or result)
+    expiry_ms = safe_int((summary or result).get("expiry_ms") or result.get("new_expiry_ms"))
+    if expiry_ms <= 0:
+        expiry_ms = int(time.time() * 1000) + 24 * 60 * 60 * 1000
+    activate_trial_subscription(user.id, link, expiry_ms)
+    set_xui_link(user.id, created_email)
+    link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Подписка создана, но панель не вернула ссылку. Напишите в поддержку."
+    await message.reply_text(
+        f"🎁 Тестовая подписка на 1 день активирована до <b>{html.escape(format_xui_datetime(expiry_ms))}</b>."
+        f"{link_line}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=client_main_keyboard(),
+    )
+    await notify_admins_about_trial_subscription(context, user, created_email, link)
+
+
 async def notify_user_about_successful_subscription(
     context: ContextTypes.DEFAULT_TYPE,
     ticket_id: int,
@@ -980,7 +1072,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
                 return True
             await message.reply_text(
                 "📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить подписку", callback_data="subscription:buy")]]),
+                reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user.id)),
             )
             return True
         try:
@@ -1518,6 +1610,12 @@ def admin_notification_keyboard(admin_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def trial_settings_keyboard() -> InlineKeyboardMarkup:
+    enabled = trial_subscriptions_enabled()
+    label = "❌ Отключить пробные подписки" if enabled else "✅ Включить пробные подписки"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="trialsettings:toggle")]])
+
+
 async def send_admin_notification_settings(message: Message, admin_id: int) -> None:
     admin = get_user(admin_id)
     name = " ".join(filter(None, [admin["first_name"], admin["last_name"]])) if admin else "не запускал бота"
@@ -1561,6 +1659,14 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
             await message.reply_text("Настройка администраторов доступна только главному администратору.")
             return True
         await message.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
+        return True
+
+    if text == ADMIN_BUTTON_TRIAL_SETTINGS:
+        if not is_super_admin(update.effective_user.id if update.effective_user else None):
+            await message.reply_text("Настройка пробных подписок доступна только главному администратору.")
+            return True
+        state = "✅ включены" if trial_subscriptions_enabled() else "❌ отключены"
+        await message.reply_text(f"🎁 Пробные подписки сейчас {state}.", reply_markup=trial_settings_keyboard())
         return True
 
     if text == ADMIN_BUTTON_TICKETS:
@@ -2933,6 +3039,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif value == "buy":
             context.user_data["client_waiting_subscribe_months"] = True
             await query.message.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+        elif value == "trial":
+            await issue_trial_subscription(update, context)
         return
 
     if action == "starsbuy":
@@ -3150,6 +3258,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Администратор не найден.", reply_markup=admin_management_keyboard())
             return
         await send_admin_notification_settings(query.message, target_admin_id)
+        return
+
+    if action == "trialsettings":
+        if not is_super_admin(user.id):
+            await query.message.reply_text("Настройка пробных подписок доступна только главному администратору.")
+            return
+        if value != "toggle":
+            return
+        enabled = not trial_subscriptions_enabled()
+        set_trial_subscriptions_enabled(enabled)
+        state = "✅ включены" if enabled else "❌ отключены"
+        await query.message.reply_text(f"🎁 Пробные подписки {state}.", reply_markup=trial_settings_keyboard())
         return
 
     if action == "admintoggle":
