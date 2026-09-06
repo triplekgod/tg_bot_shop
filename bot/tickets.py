@@ -1048,6 +1048,7 @@ ADMIN_BUTTON_RENEW = "🔄 Продлить"
 ADMIN_BUTTON_XUI_STATUS = "🔌 Статус 3x-ui"
 ADMIN_BUTTON_STATS = "📊 Статистика"
 ADMIN_BUTTON_USERS = "👤 Пользователи"
+ADMIN_BUTTON_TOPUPS = "💳 Пополнения"
 ADMIN_BUTTON_BROADCAST = "📣 Рассылка"
 ADMIN_BUTTON_REFRESH_MENUS = "🔄 Обновить меню"
 ADMIN_BUTTON_HELP = "ℹ️ Помощь"
@@ -1095,8 +1096,9 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
             [ADMIN_BUTTON_CLIENTS, ADMIN_BUTTON_INBOUNDS],
             [ADMIN_BUTTON_RENEW],
             [ADMIN_BUTTON_XUI_STATUS, ADMIN_BUTTON_STATS],
-            [ADMIN_BUTTON_USERS, ADMIN_BUTTON_BROADCAST],
-            [ADMIN_BUTTON_REFRESH_MENUS, ADMIN_BUTTON_HELP],
+            [ADMIN_BUTTON_USERS, ADMIN_BUTTON_TOPUPS],
+            [ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS],
+            [ADMIN_BUTTON_HELP],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие или используйте команду",

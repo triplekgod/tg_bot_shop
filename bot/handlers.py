@@ -1537,6 +1537,10 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         await users_command(update, context)
         return True
 
+    if text == ADMIN_BUTTON_TOPUPS:
+        await topups_command(update, context)
+        return True
+
     if text == ADMIN_BUTTON_BROADCAST:
         await message.reply_text(
             "Для рассылки используйте команду:\n"
@@ -2039,6 +2043,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Сообщений в базе: {stats['messages']}\n"
         f"Админов: {stats['admins']}"
     )
+
+
+@require_admin
+async def topups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with db() as conn:
+        rows = conn.execute("SELECT id, user_id, amount, method FROM balance_topups WHERE status = 'pending' ORDER BY id DESC LIMIT 30").fetchall()
+    if not rows:
+        await update.message.reply_text("Активных заявок на пополнение нет.", reply_markup=admin_main_keyboard())
+        return
+    buttons = [[InlineKeyboardButton(f"#{row['id']} · {row['amount']} ₽ · {row['method']}", callback_data=f"topupshow:{row['id']}")] for row in rows]
+    await update.message.reply_text("💳 Ожидают проверки:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @require_admin
@@ -3032,7 +3047,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with db() as conn:
             ref = conn.execute("SELECT referrer_user_id FROM referrals WHERE referral_user_id = ?", (target_user_id,)).fetchone()
         username = f"@{target['username']}" if target['username'] else "без username"
+        email = get_xui_link(target_user_id) or "не привязан"
         text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
+                f"Email 3x-ui: {email}\n"
                 f"Баланс: {balance_of(target_user_id)} ₽\nРефералов: {count}\nЗаработано: {earned} ₽\n"
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         keyboard = InlineKeyboardMarkup([
@@ -3040,6 +3057,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
         ])
         await query.message.reply_text(text, reply_markup=keyboard)
+        return
+
+    if action == "topupshow":
+        try:
+            topup_id = int(value)
+        except ValueError:
+            return
+        topup = get_balance_topup(topup_id)
+        if not topup or str(topup["status"]) != "pending":
+            await query.message.reply_text("Заявка уже обработана или не найдена.")
+            return
+        await query.message.reply_text(
+            f"💳 Пополнение #{topup_id}\nКлиент: {topup['user_id']}\nСумма: {topup['amount']} ₽\nСпособ: {topup['method']}",
+            reply_markup=balance_topup_confirm_keyboard(topup_id),
+        )
         return
 
     if action in {"userbalance", "userref"}:
@@ -3555,6 +3587,7 @@ async def post_init(application: Application) -> None:
         ("clients", "список клиентов 3x-ui"),
         ("inbounds", "список inbound 3x-ui"),
         ("subinfo", "информация о клиенте 3x-ui"),
+        ("topups", "заявки на пополнение"),
         ("setbalance", "установить баланс пользователя"),
         ("setreferrer", "изменить реферала пользователя"),
     ]
@@ -3594,6 +3627,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("topups", topups_command))
     application.add_handler(CommandHandler("setbalance", setbalance_command))
     application.add_handler(CommandHandler("setreferrer", setreferrer_command))
     application.add_handler(CommandHandler("stats", stats_command))

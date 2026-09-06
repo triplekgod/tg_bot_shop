@@ -383,6 +383,16 @@ class XuiClient:
             except XuiApiError as exc:
                 logger.warning("Clients API get недоступен, fallback на inbounds/list: %s", exc)
 
+                # В отдельных сборках доступен список Clients API, но endpoint
+                # /clients/get/{email} отключён. Локальная xui_links всё равно
+                # должна позволять показать подписку по email.
+                try:
+                    for row in await self.list_clients_from_clients_api():
+                        if str(row.get("email") or "").strip().casefold() == email.strip().casefold():
+                            return row
+                except XuiApiError as list_exc:
+                    logger.warning("Не удалось найти клиента по email через Clients API list: %s", list_exc)
+
         matches = await self.find_clients(email)
         if not matches:
             return None
