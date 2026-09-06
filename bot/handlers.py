@@ -1025,22 +1025,22 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
             return True
         method = str(context.user_data.pop("balance_topup_method"))
         topup_id = create_balance_topup(user.id, amount, method)
-        details = CRYPTO_PAYMENT_DETAILS if method == "crypto" else "Администратор пришлёт реквизиты P2P в этом чате."
-        if method == "p2p":
+        method_label = "криптовалютой" if method == "crypto" else "P2P"
+        if method in {"p2p", "crypto"}:
             for admin_id in get_admin_ids():
                 try:
                     await context.bot.send_message(
                         chat_id=admin_id,
-                        text=f"💳 Новая P2P-заявка на пополнение #{topup_id}: пользователь {user.id}, сумма {amount} ₽. Проверьте перевод и нажмите «Подтвердить», когда деньги поступят. Реквизиты можно отправить клиенту обычным ответом.",
+                        text=f"💳 Новая заявка на пополнение {method_label} #{topup_id}: пользователь {user.id}, сумма {amount} ₽. Сначала отправьте реквизиты кнопкой ниже; после поступления перевода подтвердите зачисление.",
                         reply_markup=balance_topup_confirm_keyboard(topup_id),
                     )
                 except TelegramError:
                     pass
         await message.reply_text(
-            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n{html.escape(details or 'Криптореквизиты ещё не настроены. Администратор свяжется с вами.')}"
-            + ("\n\nПосле перевода нажмите кнопку ниже." if method == "crypto" else "\n\nДождитесь реквизитов от администратора."),
+            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n"
+            "Дождитесь реквизитов от администратора. После перевода появится кнопка подтверждения.",
             parse_mode=ParseMode.HTML,
-            reply_markup=client_balance_topup_keyboard(topup_id) if method == "crypto" else None,
+            reply_markup=None,
         )
         return True
 

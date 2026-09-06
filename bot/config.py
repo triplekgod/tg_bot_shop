@@ -135,7 +135,6 @@ BALANCE_PRICE_PER_MONTH = max(1, int(os.getenv("BALANCE_PRICE_PER_MONTH", "250")
 BALANCE_MIN_TOPUP_RUB = max(1, int(os.getenv("BALANCE_MIN_TOPUP_RUB", "1") or 1))
 BALANCE_MAX_TOPUP_RUB = max(BALANCE_MIN_TOPUP_RUB, int(os.getenv("BALANCE_MAX_TOPUP_RUB", "100000") or 100000))
 REFERRAL_PERCENT = max(0, min(100, int(os.getenv("REFERRAL_PERCENT", "25") or 25)))
-CRYPTO_PAYMENT_DETAILS = os.getenv("CRYPTO_PAYMENT_DETAILS", "").strip()
 
 
 def parse_ids(value: str) -> set[int]:
