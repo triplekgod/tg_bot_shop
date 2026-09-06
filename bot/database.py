@@ -160,6 +160,13 @@ def init_db() -> None:
                 stars_charge_id TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS user_prices (
+                user_id INTEGER PRIMARY KEY,
+                monthly_price_rub INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            );
             """
         )
         # Миграция для уже созданных баз: старые версии бота могли создать
@@ -340,6 +347,29 @@ def set_balance(user_id: int, target_amount: int, admin_id: int) -> bool:
     delta = target_amount - current
     if delta:
         add_balance_transaction(user_id, delta, "admin_adjustment", f"Корректировка администратором {admin_id}")
+    return True
+
+
+def user_monthly_price(user_id: int) -> int:
+    with db() as conn:
+        row = conn.execute("SELECT monthly_price_rub FROM user_prices WHERE user_id = ?", (user_id,)).fetchone()
+    return int(row["monthly_price_rub"]) if row else BALANCE_PRICE_PER_MONTH
+
+
+def set_user_monthly_price(user_id: int, price: Optional[int]) -> bool:
+    if not get_user(user_id):
+        return False
+    with db() as conn:
+        if price is None:
+            conn.execute("DELETE FROM user_prices WHERE user_id = ?", (user_id,))
+            return True
+        if price < 1:
+            return False
+        conn.execute(
+            "INSERT INTO user_prices(user_id, monthly_price_rub, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET monthly_price_rub = excluded.monthly_price_rub, updated_at = excluded.updated_at",
+            (user_id, price, now_iso()),
+        )
     return True
 
 

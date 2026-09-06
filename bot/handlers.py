@@ -316,7 +316,7 @@ async def process_client_renewal_payment_choice(
     xui_email, _ = await resolve_xui_email_for_user(user.id)
     renew_days = months * XUI_DAYS_PER_MONTH
     if method == "balance":
-        cost = months * BALANCE_PRICE_PER_MONTH
+        cost = months * user_monthly_price(user.id)
         if not xui_email:
             await message.reply_text(
                 "Подписка не привязана к вашему Telegram ID. Администратор должен привязать её командой /linksub, после этого продление с баланса станет доступно.",
@@ -584,7 +584,7 @@ async def process_client_subscription_payment_choice(
     days = months * XUI_DAYS_PER_MONTH
     email = generate_subscription_email(user.id, user.username)
     if method == "balance":
-        cost = months * BALANCE_PRICE_PER_MONTH
+        cost = months * user_monthly_price(user.id)
         if balance_of(user.id) < cost:
             await message.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
             return
@@ -1668,6 +1668,20 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("Сумма должна быть неотрицательным целым числом.", reply_markup=admin_main_keyboard())
         return
 
+    edit_price_user_id = context.user_data.get("admin_edit_user_price")
+    if edit_price_user_id:
+        context.user_data.pop("admin_edit_user_price", None)
+        try:
+            price = int((message.text or "").strip())
+        except ValueError:
+            price = -1
+        if set_user_monthly_price(int(edit_price_user_id), None if price == 0 else price):
+            actual = user_monthly_price(int(edit_price_user_id))
+            await message.reply_text(f"Цена пользователя: {actual} ₽/мес.", reply_markup=admin_main_keyboard())
+        else:
+            await message.reply_text("Цена должна быть положительным числом, либо 0 для сброса.", reply_markup=admin_main_keyboard())
+        return
+
     edit_ref_user_id = context.user_data.get("admin_edit_user_referrer")
     if edit_ref_user_id:
         context.user_data.pop("admin_edit_user_referrer", None)
@@ -2672,6 +2686,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("admin_waiting_stars_invoice_ticket_id", None)
     context.user_data.pop("admin_sending_subscription_payment_details_ticket_id", None)
     context.user_data.pop("admin_sending_balance_details_topup_id", None)
+    context.user_data.pop("admin_edit_user_price", None)
     context.user_data.pop("admin_waiting_subscription_ticket_id", None)
     context.user_data.pop("admin_recording_subscription_messages", None)
     context.user_data.pop("client_waiting_subscribe_months", None)
@@ -3064,13 +3079,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ref = conn.execute("SELECT referrer_user_id FROM referrals WHERE referral_user_id = ?", (target_user_id,)).fetchone()
         username = f"@{target['username']}" if target['username'] else "без username"
         email = get_xui_link(target_user_id) or "не привязан"
+        price = user_monthly_price(target_user_id)
         text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
                 f"Email 3x-ui: {email}\n"
-                f"Баланс: {balance_of(target_user_id)} ₽\nРефералов: {count}\nЗаработано: {earned} ₽\n"
+                f"Баланс: {balance_of(target_user_id)} ₽\nЦена: {price} ₽/мес.\nРефералов: {count}\nЗаработано: {earned} ₽\n"
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Привязать email", callback_data=f"userlink:{target_user_id}")],
-            [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
+            [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("🏷 Цена/мес.", callback_data=f"userprice:{target_user_id}")],
+            [InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
         ])
         await query.message.reply_text(text, reply_markup=keyboard)
         return
@@ -3090,14 +3107,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if action in {"userbalance", "userref"}:
+    if action in {"userbalance", "userref", "userprice"}:
         try:
             target_user_id = int(value)
         except ValueError:
             return
         context.user_data["admin_edit_user_balance"] = target_user_id if action == "userbalance" else None
         context.user_data["admin_edit_user_referrer"] = target_user_id if action == "userref" else None
-        prompt = "Введите итоговый баланс в рублях." if action == "userbalance" else "Введите ID пригласившего или 0, чтобы удалить привязку."
+        context.user_data["admin_edit_user_price"] = target_user_id if action == "userprice" else None
+        prompt = (
+            "Введите итоговый баланс в рублях." if action == "userbalance" else
+            "Введите цену за месяц в рублях. Отправьте 0, чтобы вернуть общую цену из .env." if action == "userprice" else
+            "Введите ID пригласившего или 0, чтобы удалить привязку."
+        )
         await query.message.reply_text(prompt, reply_markup=admin_main_keyboard())
         return
 
