@@ -1983,7 +1983,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         banned = " 🚫" if row["is_banned"] else ""
         referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
         lines.append(f"{row['user_id']} — {name} ({username}){banned}")
-    keyboard = [[InlineKeyboardButton(f"👤 {row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
+    keyboard = [[InlineKeyboardButton(f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
