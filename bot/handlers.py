@@ -2319,7 +2319,6 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-@require_admin
 def _status_number(value: Any) -> float:
     if isinstance(value, bool):
         return float(value)
@@ -2417,6 +2416,7 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
     )
 
 
+@require_admin
 async def xui_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with XuiClient() as api:
