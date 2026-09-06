@@ -958,11 +958,12 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         with db() as conn:
             rows = conn.execute("SELECT id, status, updated_at FROM tickets WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10", (user.id,)).fetchall()
         history = "\n".join(f"#{row['id']} — {'открыто' if row['status'] == 'open' else 'закрыто'} ({row['updated_at']})" for row in rows) or "Обращений пока нет."
+        buttons = [[InlineKeyboardButton(f"#{row['id']} — {'🟢' if row['status'] == 'open' else '⚪'}", callback_data=f"clientticket:view:{row['id']}")] for row in rows]
+        buttons.append([InlineKeyboardButton("➕ Новое обращение", callback_data="clientticket:new")])
         await message.reply_text(
             f"🆘 Ваши обращения:\n{history}",
-            reply_markup=client_main_keyboard(),
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
-        await message.reply_text("Создать новое обращение:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Новое обращение", callback_data="clientticket:new")]]))
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
@@ -1634,6 +1635,32 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text(f"Ошибка 3x-ui: {exc}", reply_markup=admin_main_keyboard())
         return
 
+    edit_balance_user_id = context.user_data.get("admin_edit_user_balance")
+    if edit_balance_user_id:
+        context.user_data.pop("admin_edit_user_balance", None)
+        try:
+            amount = int((message.text or "").strip())
+        except ValueError:
+            amount = -1
+        if set_balance(int(edit_balance_user_id), amount, admin.id):
+            await message.reply_text(f"Баланс установлен: {amount} ₽.", reply_markup=admin_main_keyboard())
+        else:
+            await message.reply_text("Сумма должна быть неотрицательным целым числом.", reply_markup=admin_main_keyboard())
+        return
+
+    edit_ref_user_id = context.user_data.get("admin_edit_user_referrer")
+    if edit_ref_user_id:
+        context.user_data.pop("admin_edit_user_referrer", None)
+        try:
+            referrer_id = int((message.text or "").strip())
+        except ValueError:
+            referrer_id = -1
+        if replace_referrer(int(edit_ref_user_id), None if referrer_id == 0 else referrer_id):
+            await message.reply_text("Реферальная привязка обновлена.", reply_markup=admin_main_keyboard())
+        else:
+            await message.reply_text("Проверьте ID: пригласивший должен существовать и не совпадать с клиентом.", reply_markup=admin_main_keyboard())
+        return
+
     pending_ticket_id = context.user_data.get("reply_to_ticket_id")
     if pending_ticket_id:
         ok = await send_admin_reply(context, int(pending_ticket_id), admin.id, message)
@@ -1949,14 +1976,14 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Пользователей пока нет.")
         return
 
-    lines = ["Последние пользователи (до 20):"]
+    lines = ["Выберите пользователя:"]
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
         username = f"@{row['username']}" if row["username"] else "без username"
         banned = " 🚫" if row["is_banned"] else ""
         referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
-        lines.append(f"{row['user_id']} — {name} ({username}){banned}\n  Баланс: {row['balance']} ₽; рефералов: {row['referrals_count']}{referrer}")
-    keyboard = [[InlineKeyboardButton(f"🔗 Email: {row['user_id']}", callback_data=f"userlink:{row['user_id']}")] for row in rows]
+        lines.append(f"{row['user_id']} — {name} ({username}){banned}")
+    keyboard = [[InlineKeyboardButton(f"👤 {row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -2801,6 +2828,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("Опишите проблему одним сообщением — я передам его в поддержку.", reply_markup=client_main_keyboard())
         return
 
+    if action == "clientticket" and value.startswith("view:"):
+        try:
+            ticket_id = int(value.split(":", 1)[1])
+        except ValueError:
+            return
+        ticket = get_ticket(ticket_id)
+        if not ticket or int(ticket["user_id"]) != user.id:
+            await query.message.reply_text("Обращение не найдено.")
+            return
+        chunks = build_ticket_full_chat_chunks(ticket_id)
+        if chunks:
+            for chunk in chunks:
+                await query.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        return
+
     if action == "renewpay":
         # Формат callback: renewpay:<manual|stars>:<months>
         parts = data.split(":")
@@ -2975,6 +3017,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         context.user_data["admin_linking_xui_email_user_id"] = target_user_id
         await query.message.reply_text(f"Введите email клиента 3x-ui для пользователя {target_user_id}. Бот проверит его и запишет tgId в панель.", reply_markup=admin_main_keyboard())
+        return
+
+    if action == "userdetail":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        target = get_user(target_user_id)
+        if not target:
+            await query.message.reply_text("Пользователь не найден.")
+            return
+        count, earned = referral_stats(target_user_id)
+        with db() as conn:
+            ref = conn.execute("SELECT referrer_user_id FROM referrals WHERE referral_user_id = ?", (target_user_id,)).fetchone()
+        username = f"@{target['username']}" if target['username'] else "без username"
+        text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
+                f"Баланс: {balance_of(target_user_id)} ₽\nРефералов: {count}\nЗаработано: {earned} ₽\n"
+                f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Привязать email", callback_data=f"userlink:{target_user_id}")],
+            [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
+        ])
+        await query.message.reply_text(text, reply_markup=keyboard)
+        return
+
+    if action in {"userbalance", "userref"}:
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        context.user_data["admin_edit_user_balance"] = target_user_id if action == "userbalance" else None
+        context.user_data["admin_edit_user_referrer"] = target_user_id if action == "userref" else None
+        prompt = "Введите итоговый баланс в рублях." if action == "userbalance" else "Введите ID пригласившего или 0, чтобы удалить привязку."
+        await query.message.reply_text(prompt, reply_markup=admin_main_keyboard())
         return
 
     if action == "tickets":

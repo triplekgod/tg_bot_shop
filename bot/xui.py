@@ -282,7 +282,7 @@ class XuiClient:
     @staticmethod
     def _client_tg_id(client: dict[str, Any]) -> Any:
         """Поддержать названия поля из разных сборок 3x-ui/Clients API."""
-        for key in ("tgId", "tg_id", "telegramId", "telegram_id"):
+        for key in ("tgId", "tg_id", "telegramId", "telegram_id", "telegram", "telegramID", "telegramUserId"):
             value = client.get(key)
             if value not in (None, ""):
                 return value
@@ -298,6 +298,8 @@ class XuiClient:
         if not actual:
             return False
         if actual == target:
+            return True
+        if re.search(rf"(?<!\d){re.escape(target)}(?!\d)", actual):
             return True
         # Некоторые API сериализуют числовое tgId как "123.0".
         try:
