@@ -483,6 +483,25 @@ class XuiClient:
             obj = next((obj[key] for key in ("nodes", "items", "list", "data") if isinstance(obj.get(key), list)), [])
         return [dict(item) for item in obj if isinstance(item, dict)] if isinstance(obj, list) else []
 
+    async def get_online_client_emails(self) -> set[str]:
+        """Вернуть email клиентов, которые сейчас подключены к любой ноде."""
+        last_error: XuiApiError | None = None
+        for endpoint in ("/panel/api/clients/onlines", "/panel/api/inbounds/onlines"):
+            try:
+                data = await self.request("POST", endpoint)
+            except XuiApiError as exc:
+                last_error = exc
+                continue
+
+            obj = data.get("obj", data) if isinstance(data, dict) else data
+            if isinstance(obj, dict):
+                obj = next((obj[key] for key in ("emails", "clients", "items", "list", "data") if isinstance(obj.get(key), list)), [])
+            if not isinstance(obj, list):
+                return set()
+            return {str(email).strip().casefold() for email in obj if str(email).strip()}
+
+        raise last_error or XuiApiError("Не удалось получить список подключённых клиентов")
+
     async def restart_xray(self) -> None:
         await self.request("POST", "/panel/api/server/restartXrayService")
 

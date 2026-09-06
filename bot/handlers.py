@@ -2201,7 +2201,8 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             SELECT u.user_id, u.username, u.first_name, u.last_name, u.is_banned, u.updated_at,
                    COALESCE(b.balance, 0) AS balance,
                    COALESCE(rc.referrals_count, 0) AS referrals_count,
-                   r.referrer_user_id
+                   r.referrer_user_id,
+                   x.xui_email
             FROM users u
             LEFT JOIN (
                 SELECT user_id, SUM(amount) AS balance FROM balance_transactions GROUP BY user_id
@@ -2210,6 +2211,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 SELECT referrer_user_id, COUNT(*) AS referrals_count FROM referrals GROUP BY referrer_user_id
             ) rc ON rc.referrer_user_id = u.user_id
             LEFT JOIN referrals r ON r.referral_user_id = u.user_id
+            LEFT JOIN xui_links x ON x.telegram_user_id = u.user_id
             ORDER BY updated_at DESC
             LIMIT 20
             """
@@ -2218,6 +2220,13 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Пользователей пока нет.")
         return
 
+    try:
+        async with XuiClient() as api:
+            online_emails = await api.get_online_client_emails()
+    except XuiApiError as exc:
+        logger.warning("Не удалось получить онлайн-клиентов для списка пользователей: %s", exc)
+        online_emails = set()
+
     lines = ["Выберите пользователя:"]
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
@@ -2225,7 +2234,12 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         banned = " 🚫" if row["is_banned"] else ""
         referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
         lines.append(f"{row['user_id']} — {name} ({username}){banned}")
-    keyboard = [[InlineKeyboardButton(f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
+    keyboard = []
+    for row in rows:
+        email = str(row["xui_email"] or "").strip().casefold()
+        presence = "🟢" if email and email in online_emails else "🔴"
+        blocked = "🚫 " if row["is_banned"] else ""
+        keyboard.append([InlineKeyboardButton(f"{presence} {blocked}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")])
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -2362,6 +2376,16 @@ def _node_status_snapshot(node: dict[str, Any]) -> dict[str, Any]:
             snapshot.update(value)
     if isinstance(node.get("status"), dict):
         snapshot.update(node["status"])
+    # В ответе /nodes/list текущих 3x-ui Node метрики плоские, в отличие от
+    # /server/status: cpuPct, memPct, netUp, netDown, xrayState.
+    if snapshot.get("cpuPct") not in (None, "") and "cpu" not in snapshot:
+        snapshot["cpu"] = {"percent": snapshot["cpuPct"]}
+    if snapshot.get("memPct") not in (None, "") and "memPercent" not in snapshot:
+        snapshot["memPercent"] = snapshot["memPct"]
+    if "netIO" not in snapshot and (snapshot.get("netUp") is not None or snapshot.get("netDown") is not None):
+        snapshot["netIO"] = {"up": snapshot.get("netUp", 0), "down": snapshot.get("netDown", 0)}
+    if "xray" not in snapshot and (snapshot.get("xrayState") or snapshot.get("xrayVersion")):
+        snapshot["xray"] = {"state": snapshot.get("xrayState"), "version": snapshot.get("xrayVersion")}
     return snapshot
 
 
@@ -2380,7 +2404,7 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
 
     mem_current, mem_total = _resource_pair(data.get("mem") or data.get("memory"))
     disk_current, disk_total = _resource_pair(data.get("disk") or data.get("storage"))
-    mem_percent = mem_current * 100 / mem_total if mem_total else 0
+    mem_percent = mem_current * 100 / mem_total if mem_total else _status_number(data.get("memPercent"))
     disk_percent = disk_current * 100 / disk_total if disk_total else 0
     net = data.get("netIO") or data.get("network") or {}
     traffic = data.get("netTraffic") or data.get("traffic") or {}
@@ -2403,16 +2427,31 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
         load_text = str(load or "—")
     state_line = f"\nСостояние ноды: <b>{html.escape(node_state)}</b>" if node_state else ""
     cpu_suffix = f" · {html.escape(str(cpu_cores))} ядер" if cpu_cores not in (None, "") else ""
-    speed_line = f"\n⚡ Сейчас: ↑ {format_bytes(speed_up)}/с · ↓ {format_bytes(speed_down)}/с" if speed_up or speed_down else ""
+    speed_line = f"\n⚡ Сейчас: ↑ {format_used_bytes(speed_up)}/с · ↓ {format_used_bytes(speed_down)}/с" if speed_up or speed_down else ""
+    node_details = ""
+    if node_state is not None:
+        latency = safe_int(data.get("latencyMs"))
+        uptime = safe_int(data.get("uptimeSecs"))
+        online = safe_int(data.get("onlineCount"))
+        active = safe_int(data.get("activeCount"))
+        client_count = safe_int(data.get("clientCount"))
+        details = [f"👥 Клиенты: {active}/{client_count} активны · онлайн: {online}"]
+        if latency:
+            details.append(f"⏱ Задержка: {latency} мс")
+        if uptime:
+            details.append(f"🕒 Аптайм: {uptime // 86400} дн. {(uptime % 86400) // 3600} ч.")
+        if data.get("lastError"):
+            details.append(f"⚠️ Ошибка: {html.escape(str(data['lastError']))}")
+        node_details = "\n" + "\n".join(details)
     return (
         f"<b>🖥 {html.escape(title)}</b>{state_line}\n"
         f"⚙️ CPU: <b>{cpu_percent:.1f}%</b>{cpu_suffix}\n<code>{_percent_bar(cpu_percent)}</code>\n"
-        f"🧠 Память: <b>{mem_percent:.1f}%</b> · {format_bytes(mem_current)} / {format_bytes(mem_total)}\n<code>{_percent_bar(mem_percent)}</code>\n"
-        f"💽 Диск: <b>{disk_percent:.1f}%</b> · {format_bytes(disk_current)} / {format_bytes(disk_total)}\n<code>{_percent_bar(disk_percent)}</code>\n"
-        f"📡 Трафик: ↑ {format_bytes(net_up)} · ↓ {format_bytes(net_down)}{speed_line}\n"
+        f"🧠 Память: <b>{mem_percent:.1f}%</b> · {format_used_bytes(mem_current)} / {format_used_bytes(mem_total) if mem_total else '—'}\n<code>{_percent_bar(mem_percent)}</code>\n"
+        f"💽 Диск: <b>{disk_percent:.1f}%</b> · {format_used_bytes(disk_current)} / {format_used_bytes(disk_total) if disk_total else '—'}\n<code>{_percent_bar(disk_percent)}</code>\n"
+        f"📡 Трафик: ↑ {format_used_bytes(net_up)} · ↓ {format_used_bytes(net_down)}{speed_line}\n"
         f"🔌 Соединения: TCP {tcp} · UDP {udp}\n"
         f"📈 Load: {html.escape(load_text)}\n"
-        f"☢️ Xray: <b>{html.escape(xray_state)}</b>{' · ' + html.escape(xray_version) if xray_version else ''}"
+        f"☢️ Xray: <b>{html.escape(xray_state)}</b>{' · ' + html.escape(xray_version) if xray_version else ''}{node_details}"
     )
 
 
@@ -3512,9 +3551,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         username = f"@{target['username']}" if target['username'] else "без username"
         email = get_xui_link(target_user_id) or "не привязан"
         price = user_monthly_price(target_user_id)
+        subscription_line = "Подписка: не привязана"
+        if email != "не привязан":
+            try:
+                async with XuiClient() as api:
+                    summary = await api.get_client_summary(email)
+                if summary:
+                    expiry_ms = safe_int(summary.get("expiry_ms"))
+                    enabled = bool(summary.get("enabled", True))
+                    is_current = enabled and (expiry_ms == 0 or expiry_ms > int(time.time() * 1000))
+                    subscription_state = "✅ активна" if is_current else "⛔ неактивна"
+                    subscription_line = f"Подписка: {subscription_state} · до {format_xui_datetime(expiry_ms)}"
+                else:
+                    subscription_line = "Подписка: не найдена в 3x-ui"
+            except XuiApiError as exc:
+                logger.warning("Не удалось получить подписку пользователя %s: %s", target_user_id, exc)
+                subscription_line = "Подписка: не удалось проверить в 3x-ui"
         text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
                 f"Email 3x-ui: {email}\n"
                 f"Статус: {'🚫 заблокирован' if target['is_banned'] else '✅ активен'}\n"
+                f"{subscription_line}\n"
                 f"Баланс: {balance_of(target_user_id)} ₽\nЦена: {price} ₽/мес.\nРефералов: {count}\nЗаработано: {earned} ₽\n"
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         buttons = [
