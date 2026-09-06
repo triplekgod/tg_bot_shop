@@ -337,6 +337,9 @@ class XuiClient:
                 record = await self.get_client_record(email)
                 row = self._client_api_row_from_record(record)
                 client = dict(record.get("client") or {})
+                for key in ("subscriptionLink", "subscriptionUrl", "subLink", "link", "url"):
+                    if client.get(key):
+                        row[key] = client[key]
                 inbound_ids = record.get("inboundIds") or []
                 row["copies"] = [
                     {
@@ -484,6 +487,14 @@ class XuiClient:
 
         if not client.get("email"):
             client["email"] = email_clean
+
+        if isinstance(obj, dict):
+            for key in ("subscriptionLink", "subscriptionUrl", "subLink", "link", "url"):
+                if not client.get(key) and obj.get(key):
+                    client[key] = obj[key]
+            if not client.get("subscriptionLink") and isinstance(obj.get("subscription"), dict):
+                nested = obj["subscription"]
+                client["subscriptionLink"] = nested.get("url") or nested.get("link") or nested.get("subscriptionUrl") or ""
 
         if not isinstance(inbound_ids, list):
             inbound_ids = []

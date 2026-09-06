@@ -1035,7 +1035,7 @@ def should_show_subscription_payment_done_button(ticket_id: int) -> bool:
 CLIENT_BUTTON_SUBSCRIPTION = "📄 Подписка"
 CLIENT_BUTTON_BALANCE = "💰 Баланс"
 CLIENT_BUTTON_REFERRALS = "👥 Рефералы"
-CLIENT_BUTTON_TICKET = "🆘 Обращение"
+CLIENT_BUTTON_TICKET = "🆘 Обращения"
 
 ADMIN_BUTTON_TICKETS = "📩 Обращения"
 ADMIN_BUTTON_RENEW_REQUESTS = "🧾 Заявки на продление"

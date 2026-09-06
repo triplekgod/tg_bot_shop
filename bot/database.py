@@ -448,6 +448,7 @@ def build_subscription_link(result: dict[str, Any]) -> Optional[str]:
         or result.get("subscriptionUrl")
         or result.get("subLink")
         or result.get("link")
+        or result.get("url")
         or ""
     ).strip()
     if ready_link.startswith(("http://", "https://")):

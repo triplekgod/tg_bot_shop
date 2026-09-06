@@ -955,12 +955,14 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if text == CLIENT_BUTTON_TICKET:
         context.user_data.pop("client_waiting_renew_months", None)
         context.user_data.pop("client_waiting_subscribe_months", None)
-        context.user_data["client_waiting_ticket_text"] = True
+        with db() as conn:
+            rows = conn.execute("SELECT id, status, updated_at FROM tickets WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10", (user.id,)).fetchall()
+        history = "\n".join(f"#{row['id']} — {'открыто' if row['status'] == 'open' else 'закрыто'} ({row['updated_at']})" for row in rows) or "Обращений пока нет."
         await message.reply_text(
-            "Опишите проблему одним или несколькими сообщениями. "
-            "Я передам их в техподдержку, а ответ придёт в этот чат.",
+            f"🆘 Ваши обращения:\n{history}",
             reply_markup=client_main_keyboard(),
         )
+        await message.reply_text("Создать новое обращение:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Новое обращение", callback_data="clientticket:new")]]))
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
@@ -1611,6 +1613,27 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("Не удалось отправить реквизиты клиенту.", reply_markup=admin_main_keyboard())
         return
 
+    linking_user_id = context.user_data.get("admin_linking_xui_email_user_id")
+    if linking_user_id:
+        context.user_data.pop("admin_linking_xui_email_user_id", None)
+        email = (message.text or "").strip()
+        if not email:
+            await message.reply_text("Отправьте email клиента текстом.", reply_markup=admin_main_keyboard())
+            return
+        try:
+            async with XuiClient() as api:
+                found = await api.find_client(email)
+                if not found:
+                    await message.reply_text("Клиент с таким email не найден в 3x-ui.", reply_markup=admin_main_keyboard())
+                    return
+                if XUI_SYNC_TGID_TO_PANEL_ON_LINK:
+                    await api.set_client_tg_id(email, int(linking_user_id))
+            set_xui_link(int(linking_user_id), email)
+            await message.reply_text(f"✅ Email {email} привязан к пользователю {linking_user_id}.", reply_markup=admin_main_keyboard())
+        except XuiApiError as exc:
+            await message.reply_text(f"Ошибка 3x-ui: {exc}", reply_markup=admin_main_keyboard())
+        return
+
     pending_ticket_id = context.user_data.get("reply_to_ticket_id")
     if pending_ticket_id:
         ok = await send_admin_reply(context, int(pending_ticket_id), admin.id, message)
@@ -1933,7 +1956,8 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         banned = " 🚫" if row["is_banned"] else ""
         referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
         lines.append(f"{row['user_id']} — {name} ({username}){banned}\n  Баланс: {row['balance']} ₽; рефералов: {row['referrals_count']}{referrer}")
-    await update.message.reply_text("\n".join(lines))
+    keyboard = [[InlineKeyboardButton(f"🔗 Email: {row['user_id']}", callback_data=f"userlink:{row['user_id']}")] for row in rows]
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 @require_admin
@@ -2772,6 +2796,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(f"На сколько месяцев купить/продлить подписку за Stars?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
         return
 
+    if action == "clientticket" and value == "new":
+        context.user_data["client_waiting_ticket_text"] = True
+        await query.message.reply_text("Опишите проблему одним сообщением — я передам его в поддержку.", reply_markup=client_main_keyboard())
+        return
+
     if action == "renewpay":
         # Формат callback: renewpay:<manual|stars>:<months>
         parts = data.split(":")
@@ -2934,6 +2963,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not is_admin(user.id):
         await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    if action == "userlink":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        if not get_user(target_user_id):
+            await query.message.reply_text("Пользователь не найден.")
+            return
+        context.user_data["admin_linking_xui_email_user_id"] = target_user_id
+        await query.message.reply_text(f"Введите email клиента 3x-ui для пользователя {target_user_id}. Бот проверит его и запишет tgId в панель.", reply_markup=admin_main_keyboard())
         return
 
     if action == "tickets":
