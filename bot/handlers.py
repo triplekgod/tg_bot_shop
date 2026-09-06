@@ -2320,25 +2320,134 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 @require_admin
+def _status_number(value: Any) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace("%", "").strip())
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _status_value(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if data.get(key) not in (None, ""):
+            return data[key]
+    return None
+
+
+def _resource_pair(value: Any) -> tuple[int, int]:
+    if not isinstance(value, dict):
+        return 0, 0
+    current = safe_int(_status_value(value, "current", "used", "usage", "active", "freeUsed"))
+    total = safe_int(_status_value(value, "total", "limit", "capacity", "all"))
+    return current, total
+
+
+def _percent_bar(percent: float) -> str:
+    percent = max(0.0, min(100.0, percent))
+    filled = round(percent / 10)
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _node_status_snapshot(node: dict[str, Any]) -> dict[str, Any]:
+    """Поддержать разные поля heartbeat в версиях 3x-ui Node."""
+    snapshot = dict(node)
+    for key in ("heartbeat", "lastHeartbeat", "heartbeatPatch", "statusDetail", "snapshot", "metrics", "serverStatus", "system"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            snapshot.update(value)
+    if isinstance(node.get("status"), dict):
+        snapshot.update(node["status"])
+    return snapshot
+
+
+def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optional[str] = None) -> str:
+    data = _node_status_snapshot(status)
+    cpu_raw = data.get("cpu")
+    if isinstance(cpu_raw, dict):
+        cpu_percent = _status_number(_status_value(cpu_raw, "percent", "usage", "current", "value"))
+        cpu_cores = _status_value(cpu_raw, "cores", "coreCount")
+    elif isinstance(cpu_raw, (list, tuple)) and cpu_raw:
+        cpu_percent = _status_number(cpu_raw[0])
+        cpu_cores = cpu_raw[1] if len(cpu_raw) > 1 else None
+    else:
+        cpu_percent = _status_number(cpu_raw)
+        cpu_cores = None
+
+    mem_current, mem_total = _resource_pair(data.get("mem") or data.get("memory"))
+    disk_current, disk_total = _resource_pair(data.get("disk") or data.get("storage"))
+    mem_percent = mem_current * 100 / mem_total if mem_total else 0
+    disk_percent = disk_current * 100 / disk_total if disk_total else 0
+    net = data.get("netIO") or data.get("network") or {}
+    traffic = data.get("netTraffic") or data.get("traffic") or {}
+    net_up = safe_int(_status_value(net, "up", "sent", "upload")) if isinstance(net, dict) else 0
+    net_down = safe_int(_status_value(net, "down", "recv", "received", "download")) if isinstance(net, dict) else 0
+    speed_up = safe_int(_status_value(traffic, "up", "sent", "upload")) if isinstance(traffic, dict) else 0
+    speed_down = safe_int(_status_value(traffic, "down", "recv", "received", "download")) if isinstance(traffic, dict) else 0
+    xray = data.get("xray") or {}
+    if isinstance(xray, dict):
+        xray_state = str(_status_value(xray, "state", "status") or "неизвестно")
+        xray_version = str(_status_value(xray, "version", "ver") or "")
+    else:
+        xray_state, xray_version = str(xray or "неизвестно"), ""
+    tcp = safe_int(_status_value(data, "tcpCount", "tcp", "connections", "connectionCount"))
+    udp = safe_int(_status_value(data, "udpCount", "udp"))
+    load = data.get("load") or {}
+    if isinstance(load, dict):
+        load_text = ", ".join(str(_status_value(load, key) or "—") for key in ("load1", "load5", "load15"))
+    else:
+        load_text = str(load or "—")
+    state_line = f"\nСостояние ноды: <b>{html.escape(node_state)}</b>" if node_state else ""
+    cpu_suffix = f" · {html.escape(str(cpu_cores))} ядер" if cpu_cores not in (None, "") else ""
+    speed_line = f"\n⚡ Сейчас: ↑ {format_bytes(speed_up)}/с · ↓ {format_bytes(speed_down)}/с" if speed_up or speed_down else ""
+    return (
+        f"<b>🖥 {html.escape(title)}</b>{state_line}\n"
+        f"⚙️ CPU: <b>{cpu_percent:.1f}%</b>{cpu_suffix}\n<code>{_percent_bar(cpu_percent)}</code>\n"
+        f"🧠 Память: <b>{mem_percent:.1f}%</b> · {format_bytes(mem_current)} / {format_bytes(mem_total)}\n<code>{_percent_bar(mem_percent)}</code>\n"
+        f"💽 Диск: <b>{disk_percent:.1f}%</b> · {format_bytes(disk_current)} / {format_bytes(disk_total)}\n<code>{_percent_bar(disk_percent)}</code>\n"
+        f"📡 Трафик: ↑ {format_bytes(net_up)} · ↓ {format_bytes(net_down)}{speed_line}\n"
+        f"🔌 Соединения: TCP {tcp} · UDP {udp}\n"
+        f"📈 Load: {html.escape(load_text)}\n"
+        f"☢️ Xray: <b>{html.escape(xray_state)}</b>{' · ' + html.escape(xray_version) if xray_version else ''}"
+    )
+
+
 async def xui_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with XuiClient() as api:
             status = await api.get_server_status()
+            try:
+                nodes = await api.list_nodes()
+                nodes_error = None
+            except XuiApiError as exc:
+                nodes, nodes_error = [], str(exc)
     except XuiApiError as exc:
         await update.message.reply_text(f"Ошибка 3x-ui: {exc}")
         return
 
     if not status:
-        await update.message.reply_text("Подключение к 3x-ui есть, но статус сервера пустой.")
+        await update.message.reply_text("Подключение к 3x-ui есть, но основная панель не вернула статус сервера.")
         return
-
-    lines = ["3x-ui доступен."]
-    for key in ["xray", "uptime", "cpu", "mem", "disk", "netIO", "netTraffic"]:
-        if key in status:
-            lines.append(f"{key}: {status[key]}")
-    if len(lines) == 1:
-        lines.append(str(status)[:1200])
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(format_xui_status_card("Основная панель", status), parse_mode=ParseMode.HTML)
+    if nodes_error:
+        await update.message.reply_text(f"⚠️ Не удалось получить список нод: {nodes_error}")
+        return
+    if not nodes:
+        await update.message.reply_text("Ноды, подключённые к основной панели, не найдены.")
+        return
+    await update.message.reply_text(f"🌐 Подключённые ноды: {len(nodes)}")
+    for index, node in enumerate(nodes, start=1):
+        name = str(_status_value(node, "name", "remark", "address") or f"Нода #{index}")
+        address = str(node.get("address") or "").strip()
+        if address and address not in name:
+            name = f"{name} · {address}"
+        node_state = str(node.get("status") or ("включена" if node.get("enable", True) else "выключена"))
+        await update.message.reply_text(format_xui_status_card(name, node, node_state), parse_mode=ParseMode.HTML)
 
 
 @require_admin

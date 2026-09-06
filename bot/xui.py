@@ -475,6 +475,14 @@ class XuiClient:
             return obj if isinstance(obj, dict) else data
         return {}
 
+    async def list_nodes(self) -> list[dict[str, Any]]:
+        """Получить ноды, зарегистрированные в основной панели 3x-ui Node."""
+        data = await self.request("GET", "/panel/api/nodes/list")
+        obj = data.get("obj", data) if isinstance(data, dict) else data
+        if isinstance(obj, dict):
+            obj = next((obj[key] for key in ("nodes", "items", "list", "data") if isinstance(obj.get(key), list)), [])
+        return [dict(item) for item in obj if isinstance(item, dict)] if isinstance(obj, list) else []
+
     async def restart_xray(self) -> None:
         await self.request("POST", "/panel/api/server/restartXrayService")
 
