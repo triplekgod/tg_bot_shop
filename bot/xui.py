@@ -200,7 +200,7 @@ class XuiClient:
                         "up": up,
                         "down": down,
                         "used": up + down,
-                        "tgId": client.get("tgId") or "",
+                        "tgId": self._client_tg_id(client),
                         "subId": client.get("subId") or "",
                         "client_id": client.get("id") or "",
                     }
@@ -280,13 +280,30 @@ class XuiClient:
         return result
 
     @staticmethod
+    def _client_tg_id(client: dict[str, Any]) -> Any:
+        """Поддержать названия поля из разных сборок 3x-ui/Clients API."""
+        for key in ("tgId", "tg_id", "telegramId", "telegram_id"):
+            value = client.get(key)
+            if value not in (None, ""):
+                return value
+        return ""
+
+    @staticmethod
     def _tg_id_matches(value: Any, telegram_user_id: int) -> bool:
+        target = str(telegram_user_id).strip()
+        # В разных версиях/форках поле хранится числом, строкой или списком.
+        if isinstance(value, (list, tuple, set)):
+            return any(XuiClient._tg_id_matches(item, telegram_user_id) for item in value)
         actual = str(value or "").strip()
         if not actual:
             return False
-        target = str(telegram_user_id).strip()
-        # В разных версиях/форках поле может храниться как число, строка или строка с пробелами.
-        return actual == target
+        if actual == target:
+            return True
+        # Некоторые API сериализуют числовое tgId как "123.0".
+        try:
+            return int(float(actual)) == int(telegram_user_id) and actual.replace(".", "", 1).isdigit()
+        except ValueError:
+            return False
 
     async def find_client_email_by_tg_id(self, telegram_user_id: int) -> Optional[str]:
         """Найти email клиента в 3x-ui по полю tgId.
@@ -385,7 +402,7 @@ class XuiClient:
                     "up": 0,
                     "down": 0,
                     "used": 0,
-                    "tgId": client.get("tgId") or "",
+                    "tgId": self._client_tg_id(client),
                     "subId": client.get("subId") or "",
                     "limitIp": client.get("limitIp", 0),
                     "client_id": client.get("id") or "",
@@ -505,7 +522,7 @@ class XuiClient:
             "up": up,
             "down": down,
             "used": used,
-            "tgId": client.get("tgId") or "",
+            "tgId": XuiClient._client_tg_id(client),
             "subId": client.get("subId") or "",
             "client_id": client.get("id") or client.get("uuid") or "",
             "inbound_count": len(inbound_ids),
@@ -517,14 +534,11 @@ class XuiClient:
         obj = data.get("obj", data) if isinstance(data, dict) else data
 
         if isinstance(obj, dict):
-            if isinstance(obj.get("clients"), list):
-                items = obj["clients"]
-            elif isinstance(obj.get("records"), list):
-                items = obj["records"]
-            elif isinstance(obj.get("data"), list):
-                items = obj["data"]
-            else:
-                items = []
+            items = next((obj[key] for key in ("clients", "records", "items", "list", "data") if isinstance(obj.get(key), list)), [])
+            # В части версий ответ имеет вид {data: {items: [...]}}.
+            if not items and isinstance(obj.get("data"), dict):
+                nested = obj["data"]
+                items = next((nested[key] for key in ("clients", "records", "items", "list") if isinstance(nested.get(key), list)), [])
         elif isinstance(obj, list):
             items = obj
         else:

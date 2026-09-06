@@ -964,8 +964,14 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
-        xui_email, _ = await resolve_xui_email_for_user(user.id)
+        xui_email, source = await resolve_xui_email_for_user(user.id)
         if not xui_email:
+            if source.startswith("error:"):
+                await message.reply_text(
+                    "Не удалось проверить подписку в панели 3x-ui. Повторите позже или обратитесь в поддержку: подробности ошибки есть в журнале сервера.",
+                    reply_markup=client_main_keyboard(),
+                )
+                return True
             await message.reply_text(
                 "📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить подписку", callback_data="subscription:buy")]]),
@@ -1031,9 +1037,10 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
                 except TelegramError:
                     pass
         await message.reply_text(
-            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n{html.escape(details or 'Криптореквизиты ещё не настроены. Администратор свяжется с вами.')}\n\nПосле перевода нажмите кнопку ниже.",
+            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n{html.escape(details or 'Криптореквизиты ещё не настроены. Администратор свяжется с вами.')}"
+            + ("\n\nПосле перевода нажмите кнопку ниже." if method == "crypto" else "\n\nДождитесь реквизитов от администратора."),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Я перевёл", callback_data=f"topuppaid:{topup_id}")]]),
+            reply_markup=client_balance_topup_keyboard(topup_id) if method == "crypto" else None,
         )
         return True
 
@@ -1578,6 +1585,30 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if await handle_admin_subscription_input(update, context):
+        return
+
+    pending_topup_id = context.user_data.get("admin_sending_balance_details_topup_id")
+    if pending_topup_id:
+        topup = get_balance_topup(int(pending_topup_id))
+        context.user_data.pop("admin_sending_balance_details_topup_id", None)
+        if not topup or str(topup["status"]) != "pending":
+            await message.reply_text("Заявка на пополнение уже обработана или не найдена.", reply_markup=admin_main_keyboard())
+            return
+        try:
+            await context.bot.copy_message(
+                chat_id=int(topup["user_id"]),
+                from_chat_id=message.chat_id,
+                message_id=message.message_id,
+            )
+            await context.bot.send_message(
+                chat_id=int(topup["user_id"]),
+                text=f"Реквизиты для пополнения #{pending_topup_id} получены. После перевода нажмите «✅ Я перевёл».",
+                reply_markup=client_balance_topup_keyboard(int(pending_topup_id)),
+            )
+            await message.reply_text("Реквизиты отправлены клиенту.", reply_markup=balance_topup_confirm_keyboard(int(pending_topup_id)))
+        except TelegramError as exc:
+            logger.warning("Не удалось отправить реквизиты по пополнению #%s: %s", pending_topup_id, exc)
+            await message.reply_text("Не удалось отправить реквизиты клиенту.", reply_markup=admin_main_keyboard())
         return
 
     pending_ticket_id = context.user_data.get("reply_to_ticket_id")
@@ -2558,6 +2589,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("admin_sending_payment_details_ticket_id", None)
     context.user_data.pop("admin_waiting_stars_invoice_ticket_id", None)
     context.user_data.pop("admin_sending_subscription_payment_details_ticket_id", None)
+    context.user_data.pop("admin_sending_balance_details_topup_id", None)
     context.user_data.pop("admin_waiting_subscription_ticket_id", None)
     context.user_data.pop("admin_recording_subscription_messages", None)
     context.user_data.pop("client_waiting_subscribe_months", None)
@@ -2635,6 +2667,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Введите сумму пополнения в ₽ (от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB}).\n"
             "Эта сумма будет зачислена на внутренний баланс после оплаты/подтверждения.",
             reply_markup=client_main_keyboard(),
+        )
+        return
+
+    if action == "topupdetails":
+        if not is_admin(user.id):
+            await query.message.reply_text("Реквизиты может отправить только администратор.")
+            return
+        try:
+            topup_id = int(value)
+        except ValueError:
+            return
+        topup = get_balance_topup(topup_id)
+        if not topup or str(topup["status"]) != "pending":
+            await query.message.reply_text("Заявка уже обработана или не найдена.")
+            return
+        context.user_data["admin_sending_balance_details_topup_id"] = topup_id
+        await query.message.reply_text(
+            f"Отправьте реквизиты для пополнения #{topup_id}. Это сообщение будет переслано клиенту {topup['user_id']}.\nДля отмены используйте /cancel.",
+            reply_markup=admin_main_keyboard(),
         )
         return
 

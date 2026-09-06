@@ -1070,8 +1070,18 @@ def balance_keyboard() -> InlineKeyboardMarkup:
 
 
 def balance_topup_confirm_keyboard(topup_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Отправить реквизиты", callback_data=f"topupdetails:{topup_id}")],
+        [
+            InlineKeyboardButton("✅ Подтвердить и зачислить", callback_data=f"topupconfirm:{topup_id}"),
+            InlineKeyboardButton("❌ Отменить", callback_data=f"topupcancel:{topup_id}"),
+        ],
+    ])
+
+
+def client_balance_topup_keyboard(topup_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Подтвердить и зачислить", callback_data=f"topupconfirm:{topup_id}"),
+        InlineKeyboardButton("✅ Я перевёл", callback_data=f"topuppaid:{topup_id}"),
         InlineKeyboardButton("❌ Отменить", callback_data=f"topupcancel:{topup_id}"),
     ]])
 

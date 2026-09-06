@@ -529,7 +529,7 @@ async def resolve_xui_email_for_user(telegram_user_id: int) -> tuple[Optional[st
             panel_email = await api.find_client_email_by_tg_id(telegram_user_id)
     except XuiApiError as exc:
         logger.warning("Не удалось автоматически найти 3x-ui клиента по Telegram ID %s: %s", telegram_user_id, exc)
-        return None, "empty"
+        return None, f"error:{exc}"
 
     if panel_email:
         set_xui_link(telegram_user_id, panel_email)
