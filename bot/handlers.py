@@ -1497,6 +1497,22 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
 
     text = message.text.strip()
 
+    sections = {
+        ADMIN_BUTTON_REQUESTS_GROUP: ("📥 Заявки", "requests"),
+        ADMIN_BUTTON_TICKETS_GROUP: ("💬 Обращения", "tickets"),
+        ADMIN_BUTTON_XUI_GROUP: ("🖥 3x-ui", "xui"),
+        ADMIN_BUTTON_CLIENTS_GROUP: ("👥 Клиенты", "clients"),
+        ADMIN_BUTTON_SERVICE_GROUP: ("⚙️ Сервис", "service"),
+    }
+    if text in sections:
+        title, section = sections[text]
+        await message.reply_text(title, reply_markup=admin_section_keyboard(section))
+        return True
+
+    if text == ADMIN_BUTTON_BACK:
+        await message.reply_text("Главное меню администратора.", reply_markup=admin_main_keyboard())
+        return True
+
     if text == ADMIN_BUTTON_TICKETS:
         await tickets_command(update, context)
         return True

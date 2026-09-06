@@ -1052,6 +1052,12 @@ ADMIN_BUTTON_TOPUPS = "💳 Пополнения"
 ADMIN_BUTTON_BROADCAST = "📣 Рассылка"
 ADMIN_BUTTON_REFRESH_MENUS = "🔄 Обновить меню"
 ADMIN_BUTTON_HELP = "ℹ️ Помощь"
+ADMIN_BUTTON_REQUESTS_GROUP = "📥 Заявки"
+ADMIN_BUTTON_TICKETS_GROUP = "💬 Обращения"
+ADMIN_BUTTON_XUI_GROUP = "🖥 3x-ui"
+ADMIN_BUTTON_CLIENTS_GROUP = "👥 Клиенты"
+ADMIN_BUTTON_SERVICE_GROUP = "⚙️ Сервис"
+ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
 
 def client_main_keyboard() -> ReplyKeyboardMarkup:
@@ -1090,19 +1096,24 @@ def client_balance_topup_keyboard(topup_id: int) -> InlineKeyboardMarkup:
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_RENEW_REQUESTS],
-            [ADMIN_BUTTON_SUBSCRIPTION_REQUESTS, ADMIN_BUTTON_NEW_CLIENT_MESSAGES],
-            [ADMIN_BUTTON_HISTORY],
-            [ADMIN_BUTTON_CLIENTS, ADMIN_BUTTON_INBOUNDS],
-            [ADMIN_BUTTON_RENEW],
-            [ADMIN_BUTTON_XUI_STATUS, ADMIN_BUTTON_STATS],
-            [ADMIN_BUTTON_USERS, ADMIN_BUTTON_TOPUPS],
-            [ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS],
-            [ADMIN_BUTTON_HELP],
+            [ADMIN_BUTTON_REQUESTS_GROUP, ADMIN_BUTTON_TICKETS_GROUP],
+            [ADMIN_BUTTON_XUI_GROUP, ADMIN_BUTTON_CLIENTS_GROUP],
+            [ADMIN_BUTTON_SERVICE_GROUP],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие или используйте команду",
+        input_field_placeholder="Выберите раздел",
     )
+
+
+def admin_section_keyboard(section: str) -> ReplyKeyboardMarkup:
+    sections = {
+        "requests": [[ADMIN_BUTTON_RENEW_REQUESTS, ADMIN_BUTTON_SUBSCRIPTION_REQUESTS], [ADMIN_BUTTON_TOPUPS]],
+        "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY]],
+        "xui": [[ADMIN_BUTTON_XUI_STATUS, ADMIN_BUTTON_INBOUNDS], [ADMIN_BUTTON_RENEW]],
+        "clients": [[ADMIN_BUTTON_USERS, ADMIN_BUTTON_CLIENTS]],
+        "service": [[ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS], [ADMIN_BUTTON_STATS, ADMIN_BUTTON_HELP]],
+    }
+    return ReplyKeyboardMarkup(sections.get(section, []) + [[ADMIN_BUTTON_BACK]], resize_keyboard=True)
 
 
 def message_type(message) -> str:
