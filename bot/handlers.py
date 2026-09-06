@@ -1725,11 +1725,11 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         await topups_command(update, context)
         return True
 
-    if text == ADMIN_BUTTON_BROADCAST:
+    if text in {ADMIN_BUTTON_BROADCAST_ALL, ADMIN_BUTTON_BROADCAST_ACTIVE}:
+        context.user_data["admin_broadcast_mode"] = "active" if text == ADMIN_BUTTON_BROADCAST_ACTIVE else "all"
+        audience = "только клиентам с действующей подпиской" if context.user_data["admin_broadcast_mode"] == "active" else "всем незаблокированным пользователям"
         await message.reply_text(
-            "Для рассылки используйте команду:\n"
-            "/broadcast текст сообщения\n\n"
-            "Пример: /broadcast Сегодня будут технические работы с 22:00 до 23:00",
+            f"Отправьте текст рассылки одним сообщением. Он будет отправлен {audience}.",
             reply_markup=admin_main_keyboard(),
         )
         return True
@@ -1784,6 +1784,29 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 (new_admin_id, admin.id, now_iso()),
             )
         await message.reply_text(f"✅ Администратор {new_admin_id} добавлен.", reply_markup=admin_management_keyboard())
+        return
+
+    broadcast_mode = context.user_data.get("admin_broadcast_mode")
+    if broadcast_mode:
+        text = (message.text or "").strip()
+        if not text:
+            await message.reply_text("Для рассылки отправьте текстовым сообщением.", reply_markup=admin_main_keyboard())
+            return
+        if broadcast_mode == "active":
+            try:
+                recipient_ids = await active_client_broadcast_recipient_ids()
+            except XuiApiError as exc:
+                await message.reply_text(f"Не удалось проверить активные подписки в 3x-ui: {exc}. Повторите отправку сообщения.", reply_markup=admin_main_keyboard())
+                return
+            audience = "активным клиентам"
+        else:
+            with db() as conn:
+                rows = conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()
+            recipient_ids = [int(row["user_id"]) for row in rows]
+            audience = "всем пользователям"
+        context.user_data.pop("admin_broadcast_mode", None)
+        ok, failed = await broadcast_text_to_users(context, text, recipient_ids)
+        await message.reply_text(f"Рассылка {audience} завершена. Отправлено: {ok}, ошибок: {failed}.", reply_markup=admin_main_keyboard())
         return
 
     if await handle_admin_stars_invoice_input(update, context):
@@ -2737,6 +2760,52 @@ async def unlinksub_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("Привязка удалена." if changed else "Привязка не найдена.")
 
 
+async def broadcast_text_to_users(
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    recipient_ids: Iterable[int],
+) -> tuple[int, int]:
+    ok = 0
+    failed = 0
+    for user_id in recipient_ids:
+        try:
+            await context.bot.send_message(chat_id=int(user_id), text=text)
+            ok += 1
+        except TelegramError:
+            failed += 1
+    return ok, failed
+
+
+async def active_client_broadcast_recipient_ids() -> list[int]:
+    """Незаблокированные пользователи с действующей подпиской в 3x-ui."""
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.user_id, xl.xui_email
+            FROM users u
+            JOIN xui_links xl ON xl.telegram_user_id = u.user_id
+            WHERE u.is_banned = 0
+            """
+        ).fetchall()
+    if not rows:
+        return []
+
+    async with XuiClient() as api:
+        clients = await api.list_clients()
+    now_ms = int(time.time() * 1000)
+    active_emails = {
+        str(client.get("email") or "").strip().casefold()
+        for client in clients
+        if bool(client.get("enabled", True))
+        and (safe_int(client.get("expiry_ms")) == 0 or safe_int(client.get("expiry_ms")) > now_ms)
+    }
+    return [
+        int(row["user_id"])
+        for row in rows
+        if str(row["xui_email"] or "").strip().casefold() in active_emails
+    ]
+
+
 @require_admin
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = " ".join(context.args).strip()
@@ -2746,15 +2815,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     with db() as conn:
         rows = conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()
-
-    ok = 0
-    failed = 0
-    for row in rows:
-        try:
-            await context.bot.send_message(chat_id=int(row["user_id"]), text=text)
-            ok += 1
-        except TelegramError:
-            failed += 1
+    ok, failed = await broadcast_text_to_users(context, text, (int(row["user_id"]) for row in rows))
 
     await update.message.reply_text(f"Рассылка завершена. Отправлено: {ok}, ошибок: {failed}.")
 
@@ -2873,6 +2934,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("admin_sending_balance_details_topup_id", None)
     context.user_data.pop("admin_edit_user_price", None)
     context.user_data.pop("admin_waiting_new_admin", None)
+    context.user_data.pop("admin_broadcast_mode", None)
     context.user_data.pop("admin_waiting_subscription_ticket_id", None)
     context.user_data.pop("admin_recording_subscription_messages", None)
     context.user_data.pop("client_waiting_subscribe_months", None)
@@ -3343,14 +3405,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         price = user_monthly_price(target_user_id)
         text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
                 f"Email 3x-ui: {email}\n"
+                f"Статус: {'🚫 заблокирован' if target['is_banned'] else '✅ активен'}\n"
                 f"Баланс: {balance_of(target_user_id)} ₽\nЦена: {price} ₽/мес.\nРефералов: {count}\nЗаработано: {earned} ₽\n"
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
-        keyboard = InlineKeyboardMarkup([
+        buttons = [
             [InlineKeyboardButton("🔗 Привязать email", callback_data=f"userlink:{target_user_id}")],
             [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("🏷 Цена/мес.", callback_data=f"userprice:{target_user_id}")],
             [InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
-        ])
+        ]
+        if not is_admin(target_user_id):
+            action_label = "✅ Разблокировать" if target["is_banned"] else "🚫 Заблокировать"
+            buttons.append([InlineKeyboardButton(action_label, callback_data=f"userban:{target_user_id}")])
+        keyboard = InlineKeyboardMarkup(buttons)
         await query.message.reply_text(text, reply_markup=keyboard)
+        return
+
+    if action == "userban":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        target = get_user(target_user_id)
+        if not target:
+            await query.message.reply_text("Пользователь не найден.")
+            return
+        if is_admin(target_user_id):
+            await query.message.reply_text("Нельзя блокировать администратора через карточку пользователя.")
+            return
+        new_ban_state = not bool(target["is_banned"])
+        set_ban(target_user_id, new_ban_state)
+        await query.message.reply_text(
+            f"Пользователь {target_user_id} {'заблокирован' if new_ban_state else 'разблокирован'}.",
+            reply_markup=admin_main_keyboard(),
+        )
         return
 
     if action == "topupshow":
