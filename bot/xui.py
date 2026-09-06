@@ -616,6 +616,19 @@ class XuiClient:
         if "enable" in payload:
             payload["enable"] = bool(payload["enable"])
 
+        # 3x-ui ожидает []string, но некоторые версии Clients API возвращают
+        # allowedIPs одной строкой (например, "1.2.3.4, 5.6.7.8").
+        if "allowedIPs" in payload and not isinstance(payload["allowedIPs"], list):
+            raw_ips = payload["allowedIPs"]
+            if isinstance(raw_ips, str):
+                try:
+                    decoded = json.loads(raw_ips)
+                    payload["allowedIPs"] = decoded if isinstance(decoded, list) else [item.strip() for item in raw_ips.replace("\n", ",").split(",") if item.strip()]
+                except json.JSONDecodeError:
+                    payload["allowedIPs"] = [item.strip() for item in raw_ips.replace("\n", ",").split(",") if item.strip()]
+            else:
+                payload["allowedIPs"] = []
+
         if inbound_ids:
             clean_inbound_ids: list[int] = []
             for item in inbound_ids:
