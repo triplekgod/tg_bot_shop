@@ -2212,7 +2212,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ) rc ON rc.referrer_user_id = u.user_id
             LEFT JOIN referrals r ON r.referral_user_id = u.user_id
             LEFT JOIN xui_links x ON x.telegram_user_id = u.user_id
-            ORDER BY updated_at DESC
+            ORDER BY u.updated_at DESC
             LIMIT 20
             """
         ).fetchall()
