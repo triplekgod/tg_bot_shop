@@ -1061,6 +1061,18 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         )
         return True
 
+    if text == CLIENT_BUTTON_CONNECTION_GUIDE:
+        count = count_subscription_welcome_messages()
+        if not count:
+            await message.reply_text("Инструкция по подключению пока не настроена. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+            return True
+        sent = await send_subscription_welcome_messages(context, user.id)
+        if sent:
+            await message.reply_text("📘 Инструкции по подключению отправлены выше.", reply_markup=client_main_keyboard())
+        else:
+            await message.reply_text("Не удалось отправить инструкции. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+        return True
+
     if text == CLIENT_BUTTON_SUBSCRIPTION:
         xui_email, source = await resolve_xui_email_for_user(user.id)
         if not xui_email:

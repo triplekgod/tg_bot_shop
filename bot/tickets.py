@@ -1035,6 +1035,7 @@ def should_show_subscription_payment_done_button(ticket_id: int) -> bool:
 CLIENT_BUTTON_SUBSCRIPTION = "📄 Подписка"
 CLIENT_BUTTON_BALANCE = "💰 Баланс"
 CLIENT_BUTTON_REFERRALS = "👥 Рефералы"
+CLIENT_BUTTON_CONNECTION_GUIDE = "📘 Инструкция по подключению"
 CLIENT_BUTTON_TICKET = "🆘 Обращения"
 
 ADMIN_BUTTON_TICKETS = "📩 Обращения"
@@ -1064,7 +1065,7 @@ ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
 def client_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[CLIENT_BUTTON_SUBSCRIPTION], [CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS], [CLIENT_BUTTON_TICKET]],
+        [[CLIENT_BUTTON_SUBSCRIPTION], [CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS], [CLIENT_BUTTON_CONNECTION_GUIDE, CLIENT_BUTTON_TICKET]],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
     )
@@ -1117,7 +1118,7 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
 def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     sections = {
         "requests": [[ADMIN_BUTTON_RENEW_REQUESTS, ADMIN_BUTTON_SUBSCRIPTION_REQUESTS], [ADMIN_BUTTON_TOPUPS]],
-        "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY]],
+        "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY], [ADMIN_BUTTON_NEW_CLIENT_MESSAGES]],
         "xui": [[ADMIN_BUTTON_XUI_STATUS, ADMIN_BUTTON_INBOUNDS], [ADMIN_BUTTON_RENEW]],
         "clients": [[ADMIN_BUTTON_USERS, ADMIN_BUTTON_CLIENTS]],
         "service": [[ADMIN_BUTTON_BROADCAST, ADMIN_BUTTON_REFRESH_MENUS], [ADMIN_BUTTON_STATS, ADMIN_BUTTON_HELP]],
