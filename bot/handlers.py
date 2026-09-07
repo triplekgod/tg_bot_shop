@@ -1597,6 +1597,52 @@ async def handle_admin_stars_invoice_input(update: Update, context: ContextTypes
     return True
 
 
+async def handle_admin_direct_renewal_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Продление из карточки клиента без обращения и без изменения заявок."""
+    message = update.effective_message
+    user_id = context.user_data.get("admin_waiting_direct_renew_user_id")
+    if not message or not user_id:
+        return False
+    try:
+        days = int((message.text or "").strip())
+    except ValueError:
+        days = 0
+    if days < 1:
+        await message.reply_text("Введите количество дней положительным числом. Для отмены используйте /cancel.", reply_markup=admin_main_keyboard())
+        return True
+
+    context.user_data.pop("admin_waiting_direct_renew_user_id", None)
+    email = get_xui_link(int(user_id))
+    try:
+        async with XuiClient() as api:
+            if not email:
+                email = await api.find_client_email_by_tg_id(int(user_id))
+                if email:
+                    set_xui_link(int(user_id), email)
+            if not email:
+                await message.reply_text("Подписка не привязана. Сначала укажите email через кнопку «Привязать email».", reply_markup=admin_main_keyboard())
+                return True
+            result = await api.renew_client(email, days)
+    except XuiApiError as exc:
+        await message.reply_text(f"Ошибка продления: {exc}", reply_markup=admin_main_keyboard())
+        return True
+
+    await message.reply_text(
+        format_renew_success_admin_text(result, days) + f"\nTelegram ID: <code>{user_id}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_main_keyboard(),
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id),
+            text=f"✅ Администратор продлил вашу подписку на {days} дн. Новая дата окончания: {format_xui_datetime(safe_int(result.get('new_expiry_ms')))}.",
+            reply_markup=client_main_keyboard(),
+        )
+    except TelegramError:
+        logger.warning("Не удалось уведомить пользователя %s о ручном продлении", user_id)
+    return True
+
+
 def admin_management_keyboard() -> InlineKeyboardMarkup:
     buttons = []
     for admin_id in get_admin_ids():
@@ -1810,6 +1856,21 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if await handle_admin_stars_invoice_input(update, context):
+        return
+
+    deleting_user_id = context.user_data.get("admin_waiting_delete_user_id")
+    if deleting_user_id:
+        if (message.text or "").strip().lower() != "yes":
+            await message.reply_text("Для удаления отправьте строго <code>yes</code> или нажмите «Отмена».", parse_mode=ParseMode.HTML)
+            return
+        context.user_data.pop("admin_waiting_delete_user_id", None)
+        if delete_user_completely(int(deleting_user_id)):
+            await message.reply_text(f"Пользователь {deleting_user_id} и его локальные данные удалены. Подписка в 3x-ui не удалялась.", reply_markup=admin_main_keyboard())
+        else:
+            await message.reply_text("Пользователь уже удалён или не найден.", reply_markup=admin_main_keyboard())
+        return
+
+    if await handle_admin_direct_renewal_input(update, context):
         return
 
     if await handle_admin_renewal_input(update, context):
@@ -2428,6 +2489,17 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
     state_line = f"\nСостояние ноды: <b>{html.escape(node_state)}</b>" if node_state else ""
     cpu_suffix = f" · {html.escape(str(cpu_cores))} ядер" if cpu_cores not in (None, "") else ""
     speed_line = f"\n⚡ Сейчас: ↑ {format_used_bytes(speed_up)}/с · ↓ {format_used_bytes(speed_down)}/с" if speed_up or speed_down else ""
+    is_node = node_state is not None
+    disk_line = (
+        f"💽 Диск: <b>{disk_percent:.1f}%</b> · {format_used_bytes(disk_current)} / {format_used_bytes(disk_total) if disk_total else '—'}\n<code>{_percent_bar(disk_percent)}</code>"
+        if disk_total
+        else "💽 Диск: <i>данные не передаются нодой</i>"
+    )
+    connections_line = (
+        f"🔌 Соединения: TCP {tcp} · UDP {udp}"
+        if not is_node or tcp or udp
+        else "🔌 Соединения: <i>TCP/UDP-метрики не передаются нодой</i>"
+    )
     node_details = ""
     if node_state is not None:
         latency = safe_int(data.get("latencyMs"))
@@ -2447,9 +2519,9 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
         f"<b>🖥 {html.escape(title)}</b>{state_line}\n"
         f"⚙️ CPU: <b>{cpu_percent:.1f}%</b>{cpu_suffix}\n<code>{_percent_bar(cpu_percent)}</code>\n"
         f"🧠 Память: <b>{mem_percent:.1f}%</b> · {format_used_bytes(mem_current)} / {format_used_bytes(mem_total) if mem_total else '—'}\n<code>{_percent_bar(mem_percent)}</code>\n"
-        f"💽 Диск: <b>{disk_percent:.1f}%</b> · {format_used_bytes(disk_current)} / {format_used_bytes(disk_total) if disk_total else '—'}\n<code>{_percent_bar(disk_percent)}</code>\n"
+        f"{disk_line}\n"
         f"📡 Трафик: ↑ {format_used_bytes(net_up)} · ↓ {format_used_bytes(net_down)}{speed_line}\n"
-        f"🔌 Соединения: TCP {tcp} · UDP {udp}\n"
+        f"{connections_line}\n"
         f"📈 Load: {html.escape(load_text)}\n"
         f"☢️ Xray: <b>{html.escape(xray_state)}</b>{' · ' + html.escape(xray_version) if xray_version else ''}{node_details}"
     )
@@ -3076,6 +3148,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("reply_to_ticket_id", None)
     context.user_data.pop("admin_waiting_renew_ticket_id", None)
     context.user_data.pop("admin_waiting_renew_no_link_ticket_id", None)
+    context.user_data.pop("admin_waiting_direct_renew_user_id", None)
+    context.user_data.pop("admin_waiting_delete_user_id", None)
     context.user_data.pop("admin_sending_payment_details_ticket_id", None)
     context.user_data.pop("admin_waiting_stars_invoice_ticket_id", None)
     context.user_data.pop("admin_sending_subscription_payment_details_ticket_id", None)
@@ -3524,6 +3598,104 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(f"Администратор {target_admin_id} удалён.", reply_markup=admin_management_keyboard())
         return
 
+    if action in {"userlink", "userdetail", "userban", "userbalance", "userref", "userprice", "userrenew", "userrenewmanual", "userrenewrequest", "userrenewrequestticket", "userdelete", "userdeletecancel"} and not is_admin(user.id):
+        await query.message.reply_text("Это действие доступно только администраторам.")
+        return
+
+    if action == "userrenew":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        if not get_user(target_user_id):
+            await query.message.reply_text("Пользователь не найден.")
+            return
+        await query.message.reply_text(
+            "Как продлить подписку?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Продлить по заявке", callback_data=f"userrenewrequest:{target_user_id}")],
+                [InlineKeyboardButton("⚡ Продлить без заявки", callback_data=f"userrenewmanual:{target_user_id}")],
+            ]),
+        )
+        return
+
+    if action == "userrenewmanual":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        if not get_user(target_user_id):
+            await query.message.reply_text("Пользователь не найден.")
+            return
+        context.user_data["admin_waiting_direct_renew_user_id"] = target_user_id
+        await query.message.reply_text("Введите количество дней для продления. Это продление не будет связано с заявкой.", reply_markup=admin_main_keyboard())
+        return
+
+    if action == "userrenewrequest":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.ticket_id, r.days, r.months, r.status, t.created_at
+                FROM renewal_requests r
+                JOIN tickets t ON t.id = r.ticket_id
+                WHERE r.telegram_user_id = ? AND r.status NOT IN ('renewed', 'rejected')
+                ORDER BY r.ticket_id DESC
+                """,
+                (target_user_id,),
+            ).fetchall()
+        if not rows:
+            await query.message.reply_text("У пользователя нет незавершённых заявок на продление. Выберите «Продлить без заявки».")
+            return
+        buttons = [
+            [InlineKeyboardButton(f"Заявка #{row['ticket_id']} · {row['days']} дн. · {row['status']}", callback_data=f"userrenewrequestticket:{target_user_id}:{row['ticket_id']}")]
+            for row in rows
+        ]
+        await query.message.reply_text("Выберите заявку для продления:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    if action == "userrenewrequestticket":
+        try:
+            target_raw, ticket_raw = value.split(":", 1)
+            target_user_id, ticket_id = int(target_raw), int(ticket_raw)
+        except ValueError:
+            return
+        request = get_renewal_request(ticket_id)
+        if not request or int(request["telegram_user_id"]) != target_user_id:
+            await query.message.reply_text("Заявка не найдена или не принадлежит этому пользователю.")
+            return
+        await ask_admin_for_renewal_input(query.message, context, ticket_id, bind_email_to_user=True)
+        return
+
+    if action == "userdelete":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        if not get_user(target_user_id) or is_admin(target_user_id):
+            await query.message.reply_text("Нельзя удалить администратора или несуществующего пользователя.")
+            return
+        context.user_data["admin_waiting_delete_user_id"] = target_user_id
+        await query.message.reply_text(
+            f"⚠️ Удалить пользователя {target_user_id} и все его локальные данные бота? Подписка в 3x-ui останется.\n\nОтправьте <code>yes</code> для подтверждения.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data=f"userdeletecancel:{target_user_id}")]]),
+        )
+        return
+
+    if action == "userdeletecancel":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        if context.user_data.get("admin_waiting_delete_user_id") == target_user_id:
+            context.user_data.pop("admin_waiting_delete_user_id", None)
+        await query.message.reply_text("Удаление отменено.", reply_markup=admin_main_keyboard())
+        return
+
     if action == "userlink":
         try:
             target_user_id = int(value)
@@ -3575,12 +3747,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         buttons = [
             [InlineKeyboardButton("🔗 Привязать email", callback_data=f"userlink:{target_user_id}")],
+            [InlineKeyboardButton("🔄 Продлить подписку", callback_data=f"userrenew:{target_user_id}")],
             [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("🏷 Цена/мес.", callback_data=f"userprice:{target_user_id}")],
             [InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],
         ]
         if not is_admin(target_user_id):
             action_label = "✅ Разблокировать" if target["is_banned"] else "🚫 Заблокировать"
             buttons.append([InlineKeyboardButton(action_label, callback_data=f"userban:{target_user_id}")])
+            buttons.append([InlineKeyboardButton("🗑 Удалить пользователя", callback_data=f"userdelete:{target_user_id}")])
         keyboard = InlineKeyboardMarkup(buttons)
         await query.message.reply_text(text, reply_markup=keyboard)
         return

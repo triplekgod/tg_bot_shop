@@ -460,6 +460,30 @@ def set_referrer(referral_user_id: int, referrer_user_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def delete_user_completely(user_id: int) -> bool:
+    """Удалить локальный профиль и связанные данные бота, не трогая 3x-ui."""
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone():
+            return False
+        ticket_rows = conn.execute("SELECT id FROM tickets WHERE user_id = ?", (user_id,)).fetchall()
+        ticket_ids = [int(row["id"]) for row in ticket_rows]
+        if ticket_ids:
+            placeholders = ", ".join("?" for _ in ticket_ids)
+            conn.execute(f"DELETE FROM admin_message_map WHERE ticket_id IN ({placeholders})", ticket_ids)
+            conn.execute(f"DELETE FROM messages WHERE ticket_id IN ({placeholders})", ticket_ids)
+            conn.execute(f"DELETE FROM renewal_requests WHERE ticket_id IN ({placeholders})", ticket_ids)
+            conn.execute(f"DELETE FROM subscription_requests WHERE ticket_id IN ({placeholders})", ticket_ids)
+        conn.execute("DELETE FROM tickets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM referrals WHERE referral_user_id = ? OR referrer_user_id = ?", (user_id, user_id))
+        conn.execute("DELETE FROM balance_transactions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM balance_topups WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_prices WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM trial_subscriptions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM xui_links WHERE telegram_user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    return True
+
+
 def replace_referrer(referral_user_id: int, referrer_user_id: Optional[int]) -> bool:
     """Админская правка привязки реферала; None полностью снимает её."""
     if referrer_user_id is not None and referral_user_id == referrer_user_id:
