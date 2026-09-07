@@ -95,6 +95,7 @@ def init_db() -> None:
                 payment_details_sent_at TEXT,
                 payment_details_sent_by INTEGER,
                 payment_method TEXT,
+                price_rub INTEGER,
                 stars_amount INTEGER,
                 stars_invoice_sent_at TEXT,
                 stars_invoice_sent_by INTEGER,
@@ -120,6 +121,7 @@ def init_db() -> None:
                 payment_details_sent_at TEXT,
                 payment_details_sent_by INTEGER,
                 payment_method TEXT,
+                price_rub INTEGER,
                 stars_amount INTEGER,
                 stars_invoice_sent_at TEXT,
                 stars_invoice_sent_by INTEGER,
@@ -212,6 +214,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE renewal_requests ADD COLUMN payment_details_sent_by INTEGER")
         if "payment_method" not in columns:
             conn.execute("ALTER TABLE renewal_requests ADD COLUMN payment_method TEXT")
+        if "price_rub" not in columns:
+            conn.execute("ALTER TABLE renewal_requests ADD COLUMN price_rub INTEGER")
         if "stars_amount" not in columns:
             conn.execute("ALTER TABLE renewal_requests ADD COLUMN stars_amount INTEGER")
         if "stars_invoice_sent_at" not in columns:
@@ -220,6 +224,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE renewal_requests ADD COLUMN stars_invoice_sent_by INTEGER")
         if "stars_charge_id" not in columns:
             conn.execute("ALTER TABLE renewal_requests ADD COLUMN stars_charge_id TEXT")
+
+        subscription_columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_requests)").fetchall()}
+        if "price_rub" not in subscription_columns:
+            conn.execute("ALTER TABLE subscription_requests ADD COLUMN price_rub INTEGER")
 
         for admin_id in ENV_ADMIN_IDS | ({SUPER_ADMIN_ID} if SUPER_ADMIN_ID else set()):
             if admin_id:

@@ -26,8 +26,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Основные команды:\n"
             "/tickets — открытые обращения\n"
             "/history — история обращений\n"
-            "/renewals — заявки на продление\n"
-            "/subscriptions — заявки на оформление подписки\n/submessages — сообщения, которые отправляются новым клиентам\n"
+            "/subscriptionevents — оформления и продления\n"
+            "/renewals, /subscriptions — старые раздельные списки\n/submessages — сообщения, которые отправляются новым клиентам\n"
             "/reply ID текст — ответить пользователю\n"
             "/close ID — закрыть обращение\n"
             "/stats — статистика\n"
@@ -62,8 +62,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Команды администратора:\n\n"
             "/tickets — список открытых обращений с кнопками\n"
             "/history — история всех обращений и полный чат\n"
-            "/renewals — заявки на продление с кнопками\n"
-            "/subscriptions — заявки на оформление подписки с кнопками\n/submessages — настроить сообщения новым клиентам\n"
+            "/subscriptionevents — оформления и продления с кнопками\n"
+            "/renewals, /subscriptions — старые раздельные списки\n/submessages — настроить сообщения новым клиентам\n"
             "/ticket ID — информация по обращению\n"
             "/reply ID текст — ответ пользователю\n"
             "/close ID — закрыть обращение\n"
@@ -340,7 +340,10 @@ async def process_client_renewal_payment_choice(
 
     method = "stars" if method == "stars" else "manual"
     ticket_id = create_ticket(user.id)
-    create_renewal_request(ticket_id, user.id, xui_email, months, renew_days, payment_method=method)
+    create_renewal_request(
+        ticket_id, user.id, xui_email, months, renew_days,
+        payment_method=method, price_rub=months * user_monthly_price(user.id),
+    )
     log_message(
         ticket_id=ticket_id,
         direction="user_to_admin",
@@ -605,7 +608,10 @@ async def process_client_subscription_payment_choice(
 
     method = "stars" if method == "stars" else "manual"
     ticket_id = create_ticket(user.id)
-    create_subscription_request(ticket_id, user.id, email, months, days, payment_method=method)
+    create_subscription_request(
+        ticket_id, user.id, email, months, days,
+        payment_method=method, price_rub=months * user_monthly_price(user.id),
+    )
     log_message(
         ticket_id=ticket_id,
         direction="user_to_admin",
@@ -1761,6 +1767,10 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         await subscription_requests_command(update, context)
         return True
 
+    if text == ADMIN_BUTTON_SUBSCRIPTION_EVENTS:
+        await subscription_events_command(update, context)
+        return True
+
     if text == ADMIN_BUTTON_CLIENTS:
         await clients_command(update, context)
         return True
@@ -2081,6 +2091,20 @@ async def subscription_requests_command(update: Update, context: ContextTypes.DE
 
     rows, page, pages, total = list_subscription_requests(page)
     text, keyboard = format_subscription_requests_page(rows, page, pages, total)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@require_admin
+async def subscription_events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    page = 1
+    if context.args:
+        try:
+            page = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Страница должна быть числом. Например: /subscriptionevents 2")
+            return
+    rows, page, pages, total = list_subscription_events(page)
+    text, keyboard = format_subscription_events_page(rows, page, pages, total)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
@@ -3975,16 +3999,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Заявка не найдена.")
             return
         status_text = {"pending": "🕐 ожидает проверки", "confirmed": "✅ зачислено", "cancelled": "❌ отменено"}.get(str(topup["status"]), str(topup["status"]))
+        client_profile = f'<a href="tg://user?id={topup["user_id"]}">Открыть профиль клиента</a> · <code>{topup["user_id"]}</code>'
         details = (
             f"💳 Пополнение #{topup_id}\n"
-            f"Клиент: {topup['user_id']}\nСумма: {topup['amount']} ₽\n"
+            f"Клиент: {client_profile}\nСумма: {topup['amount']} ₽\n"
             f"Способ: {topup['method']}\nСтатус: {status_text}\n"
             f"Создано: {topup['created_at']}"
         )
         if topup["confirmed_at"]:
-            details += f"\nОбработано: {topup['confirmed_at']} · администратор: {topup['confirmed_by'] or 'автоматически'}"
+            if topup["confirmed_by"]:
+                admin_id = int(topup["confirmed_by"])
+                admin_profile = f'<a href="tg://user?id={admin_id}">Открыть профиль администратора</a> · <code>{admin_id}</code>'
+            else:
+                admin_profile = "автоматически"
+            details += f"\nОбработано: {topup['confirmed_at']} · администратор: {admin_profile}"
         await query.message.reply_text(
             details,
+            parse_mode=ParseMode.HTML,
             reply_markup=balance_topup_confirm_keyboard(topup_id) if str(topup["status"]) == "pending" else None,
         )
         return
@@ -4071,6 +4102,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         rows, page, pages, total = list_subscription_requests(page)
         text, keyboard = format_subscription_requests_page(rows, page, pages, total)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    elif action == "subevents":
+        try:
+            page = int(value)
+        except ValueError:
+            await query.message.reply_text("Некорректный номер страницы.")
+            return
+        rows, page, pages, total = list_subscription_events(page)
+        text, keyboard = format_subscription_events_page(rows, page, pages, total)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "submsgrecord":
@@ -4537,6 +4578,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("renewals", renewal_requests_command))
     application.add_handler(CommandHandler("subscriptions", subscription_requests_command))
+    application.add_handler(CommandHandler("subscriptionevents", subscription_events_command))
     application.add_handler(CommandHandler("submessages", subscription_messages_command))
     application.add_handler(CommandHandler("setsubmessages", set_subscription_messages_command))
     application.add_handler(CommandHandler("clearsubmessages", clear_subscription_messages_command))

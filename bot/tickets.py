@@ -107,17 +107,18 @@ def create_renewal_request(
     months: int,
     days: int,
     payment_method: str = "manual",
+    price_rub: Optional[int] = None,
 ) -> None:
     payment_method = "stars" if str(payment_method).lower() == "stars" else "manual"
     with db() as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO renewal_requests(
-                ticket_id, telegram_user_id, xui_email, months, days, status, created_at, payment_method
+                ticket_id, telegram_user_id, xui_email, months, days, status, created_at, payment_method, price_rub
             )
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
-            (ticket_id, telegram_user_id, xui_email, months, days, now_iso(), payment_method),
+            (ticket_id, telegram_user_id, xui_email, months, days, now_iso(), payment_method, price_rub),
         )
 
 
@@ -642,15 +643,16 @@ def create_subscription_request(
     months: int,
     days: int,
     payment_method: str = "manual",
+    price_rub: Optional[int] = None,
 ) -> None:
     with db() as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO subscription_requests(
-                ticket_id, telegram_user_id, xui_email, months, days, status, created_at, payment_method
-            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                ticket_id, telegram_user_id, xui_email, months, days, status, created_at, payment_method, price_rub
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
-            (ticket_id, telegram_user_id, xui_email, months, days, now_iso(), payment_method),
+            (ticket_id, telegram_user_id, xui_email, months, days, now_iso(), payment_method, price_rub),
         )
 
 
@@ -814,6 +816,77 @@ def format_subscription_requests_page(rows: list[sqlite3.Row], page: int, pages:
     if nav_buttons:
         keyboard_rows.append(nav_buttons)
     return "\n".join(lines), InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+
+
+def list_subscription_events(page: int = 1, per_page: int = RENEWAL_REQUESTS_PER_PAGE) -> tuple[list[sqlite3.Row], int, int, int]:
+    """Единая история покупок и продлений: Stars, баланс и старые заявки."""
+    source = """
+        SELECT 'renewal' AS event_type, rr.ticket_id, rr.telegram_user_id, rr.months, rr.days,
+               rr.status, rr.payment_method, rr.price_rub, rr.stars_amount,
+               COALESCE(rr.renewed_at, rr.created_at) AS event_at, NULL AS note,
+               u.username, u.first_name, u.last_name
+        FROM renewal_requests rr JOIN users u ON u.user_id = rr.telegram_user_id
+        UNION ALL
+        SELECT 'subscription' AS event_type, sr.ticket_id, sr.telegram_user_id, sr.months, sr.days,
+               sr.status, sr.payment_method, sr.price_rub, sr.stars_amount,
+               COALESCE(sr.created_at_panel, sr.created_at) AS event_at, NULL AS note,
+               u.username, u.first_name, u.last_name
+        FROM subscription_requests sr JOIN users u ON u.user_id = sr.telegram_user_id
+        UNION ALL
+        SELECT CASE WHEN bt.note LIKE 'Продление%' THEN 'renewal' ELSE 'subscription' END AS event_type,
+               NULL AS ticket_id, bt.user_id, NULL AS months, NULL AS days,
+               'completed' AS status, 'balance' AS payment_method, -bt.amount AS price_rub,
+               NULL AS stars_amount, bt.created_at AS event_at, bt.note,
+               u.username, u.first_name, u.last_name
+        FROM balance_transactions bt JOIN users u ON u.user_id = bt.user_id
+        WHERE bt.kind = 'subscription_payment'
+    """
+    with db() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) AS c FROM ({source})").fetchone()["c"])
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = min(max(page, 1), pages)
+        rows = conn.execute(
+            f"SELECT * FROM ({source}) ORDER BY event_at DESC LIMIT ? OFFSET ?",
+            (per_page, (page - 1) * per_page),
+        ).fetchall()
+    return list(rows), page, pages, total
+
+
+def format_subscription_events_page(rows: list[sqlite3.Row], page: int, pages: int, total: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    if not rows:
+        return "Операций оформления и продления пока нет.", None
+    labels = {"renewal": "🔄 Продление", "subscription": "🆕 Оформление"}
+    status_labels = {"pending": "🕐 ожидает", "renewed": "✅ выполнено", "created": "✅ выполнено", "completed": "✅ выполнено", "rejected": "❌ отменено"}
+    lines = [f"📋 Оформления и продления: {total}", f"Страница {page}/{pages}", ""]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for row in rows:
+        name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
+        handle = f"@{row['username']}" if row["username"] else "без username"
+        kind = str(row["event_type"])
+        status = str(row["status"])
+        duration = f"{row['months']} мес. ({row['days']} дн.)" if row["months"] else "—"
+        method = str(row["payment_method"] or "manual")
+        method_text = "внутренний баланс" if method == "balance" else payment_method_label(method)
+        price = f"{row['price_rub']} ₽" if row["price_rub"] is not None else "не сохранена"
+        if row["stars_amount"] is not None:
+            price += f" · {row['stars_amount']} ⭐"
+        note = f"\n   Детали: <code>{html.escape(str(row['note']))}</code>" if row["note"] else ""
+        lines.append(
+            f"{labels.get(kind, kind)} · {status_labels.get(status, status)}\n"
+            f"   Клиент: <a href=\"tg://user?id={row['telegram_user_id']}\">{html.escape(name)}</a> ({html.escape(handle)}), <code>{row['telegram_user_id']}</code>\n"
+            f"   Когда: <code>{html.escape(str(row['event_at']))}</code> · срок: <code>{duration}</code>\n"
+            f"   Цена: <code>{price}</code> · способ: <code>{html.escape(method_text)}</code>{note}"
+        )
+        if row["ticket_id"]:
+            buttons.append([InlineKeyboardButton(f"Подробнее: #{row['ticket_id']} · {name[:22]}", callback_data=f"ticket:{row['ticket_id']}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"subevents:{page - 1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"subevents:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    return "\n\n".join(lines), InlineKeyboardMarkup(buttons) if buttons else None
 
 
 def user_display_from_row(row: sqlite3.Row) -> str:
@@ -1051,6 +1124,7 @@ CLIENT_BUTTON_TICKET = "🆘 Обращения"
 ADMIN_BUTTON_TICKETS = "📩 Обращения"
 ADMIN_BUTTON_RENEW_REQUESTS = "🧾 Заявки на продление"
 ADMIN_BUTTON_SUBSCRIPTION_REQUESTS = "🆕 Заявки на оформление"
+ADMIN_BUTTON_SUBSCRIPTION_EVENTS = "📋 Оформления и продления"
 ADMIN_BUTTON_NEW_CLIENT_MESSAGES = "📝 Сообщения новым клиентам"
 ADMIN_BUTTON_HISTORY = "📚 История обращений"
 ADMIN_BUTTON_CLIENTS = "👥 Клиенты 3x-ui"
@@ -1128,7 +1202,7 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
 
 def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     sections = {
-        "requests": [[ADMIN_BUTTON_RENEW_REQUESTS, ADMIN_BUTTON_SUBSCRIPTION_REQUESTS], [ADMIN_BUTTON_TOPUPS]],
+        "requests": [[ADMIN_BUTTON_SUBSCRIPTION_EVENTS], [ADMIN_BUTTON_TOPUPS]],
         "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY], [ADMIN_BUTTON_NEW_CLIENT_MESSAGES]],
         "xui": [[ADMIN_BUTTON_XUI_STATUS, ADMIN_BUTTON_INBOUNDS], [ADMIN_BUTTON_RENEW]],
         "clients": [[ADMIN_BUTTON_USERS, ADMIN_BUTTON_CLIENTS]],
