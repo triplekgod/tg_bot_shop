@@ -1063,7 +1063,9 @@ def renewal_ticket_keyboard(ticket_id: int, user_id: int) -> InlineKeyboardMarku
     elif not request:
         rows.append([InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{ticket_id}")])
 
-    if request and str(request["status"]) == "pending":
+    if request and str(request["status"]) == "pending" and not (
+        str(request["payment_method"] or "manual") == "stars" and request["payment_confirmed_at"]
+    ):
         rows.append([InlineKeyboardButton("❌ Отклонить заявку", callback_data=f"rejectrenew:{ticket_id}")])
 
     rows.append([
@@ -1102,7 +1104,9 @@ def subscription_ticket_keyboard(ticket_id: int, user_id: int) -> InlineKeyboard
     else:
         rows.append([InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{ticket_id}")])
 
-    if request and str(request["status"]) == "pending":
+    if request and str(request["status"]) == "pending" and not (
+        str(request["payment_method"] or "manual") == "stars" and request["payment_confirmed_at"]
+    ):
         rows.append([InlineKeyboardButton("❌ Отклонить заявку", callback_data=f"rejectsub:{ticket_id}")])
 
     rows.append([

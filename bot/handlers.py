@@ -3343,6 +3343,13 @@ async def reject_renewal_ticket(
         await reply_message.reply_text("Эта заявка уже была отклонена.")
         return
 
+    if str(request["payment_method"] or "manual") == "stars" and request["payment_confirmed_at"]:
+        await reply_message.reply_text(
+            "Оплата Telegram Stars уже подтверждена, поэтому отклонять заявку нельзя. "
+            "Если автоматическое продление не сработало, используйте кнопку «Продлить по заявке»."
+        )
+        return
+
     mark_renewal_request_rejected(ticket_id, admin_id)
     close_ticket(ticket_id)
     log_message(
@@ -4359,6 +4366,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ticket = get_ticket(ticket_id)
         if not request or not ticket:
             await query.message.reply_text("Заявка на оформление не найдена.")
+            return
+        if str(request["status"]) in {"created", "rejected"}:
+            await query.message.reply_text("Эта заявка уже обработана.")
+            return
+        if str(request["payment_method"] or "manual") == "stars" and request["payment_confirmed_at"]:
+            await query.message.reply_text(
+                "Оплата Telegram Stars уже подтверждена, поэтому отклонять заявку нельзя. "
+                "Если автоматическое оформление не сработало, используйте кнопку «Создать клиента»."
+            )
             return
         mark_subscription_request_rejected(ticket_id, user.id)
         close_ticket(ticket_id)
