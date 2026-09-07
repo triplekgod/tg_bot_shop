@@ -335,6 +335,9 @@ async def process_client_renewal_payment_choice(
         if not spend_balance(user.id, cost, f"Продление на {months} мес."):
             await message.reply_text("Баланс изменился, средств уже недостаточно. Проверьте его и повторите попытку.", reply_markup=client_main_keyboard())
             return
+        await notify_admins_about_balance_subscription_operation(
+            context, user, "renewal", months, renew_days, cost, xui_email,
+        )
         await message.reply_text(f"✅ Подписка продлена на {renew_days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.", reply_markup=client_main_keyboard())
         return
 
@@ -405,6 +408,40 @@ async def notify_admins_about_auto_stars_renewal(
             save_admin_message_map(admin_id, sent.message_id, ticket_id, user_id)
         except TelegramError as exc:
             logger.warning("Не удалось отправить уведомление об автопродлении админу %s: %s", admin_id, exc)
+    await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("payments")))
+
+
+async def notify_admins_about_balance_subscription_operation(
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    operation: str,
+    months: int,
+    days: int,
+    cost: int,
+    email: Optional[str] = None,
+) -> None:
+    """Уведомление о полностью автоматической операции с внутреннего баланса."""
+    profile_url = trial_profile_url(user)
+    name = " ".join(filter(None, [user.first_name, user.last_name])).strip() or "Без имени"
+    username = f"@{user.username}" if user.username else "без username"
+    title = "🔄 Подписка продлена" if operation == "renewal" else "🆕 Подписка оформлена"
+    email_line = f"\nEmail 3x-ui: <code>{html.escape(email)}</code>" if email else ""
+    text = (
+        f"{title} автоматически с внутреннего баланса.\n\n"
+        f"Клиент: <a href=\"{html.escape(profile_url, quote=True)}\">{html.escape(name)}</a> ({html.escape(username)})\n"
+        f"Telegram ID: <code>{user.id}</code>{email_line}\n"
+        f"Срок: <code>{month_word(months)}</code> ({days} дн.)\n"
+        f"Списано: <code>{cost} ₽</code>\n"
+        f"Время: <code>{now_iso()}</code>\n\n"
+        "Операция уже выполнена, подтверждение администратора не требуется."
+    )
+
+    async def deliver(admin_id: int) -> None:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML)
+        except TelegramError as exc:
+            logger.warning("Не удалось уведомить админа %s об операции с баланса: %s", admin_id, exc)
+
     await asyncio.gather(*(deliver(admin_id) for admin_id in get_admin_ids_for_notification("payments")))
 
 
@@ -601,6 +638,9 @@ async def process_client_subscription_payment_choice(
             await message.reply_text("Баланс изменился, средств уже недостаточно. Созданную подписку проверьте у администратора.", reply_markup=client_main_keyboard())
             return
         set_xui_link(user.id, str(result.get("email") or email))
+        await notify_admins_about_balance_subscription_operation(
+            context, user, "subscription", months, days, cost, str(result.get("email") or email),
+        )
         link = build_subscription_link(result)
         link_text = f"\nСсылка подписки: {link}" if link else ""
         await message.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}", reply_markup=client_main_keyboard())
