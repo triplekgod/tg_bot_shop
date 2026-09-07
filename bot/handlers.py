@@ -1119,9 +1119,13 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
 
         context.user_data.pop("client_waiting_renew_months", None)
         context.user_data["client_renew_months"] = months
+        monthly_price = user_monthly_price(user.id)
+        total_price = months * monthly_price
         await message.reply_text(
-            f"Вы выбрали продление на {month_word(months)}.\n\n"
+            f"Вы выбрали продление на {month_word(months)}.\n"
+            f"Цена: <b>{monthly_price} ₽/мес.</b> · Итого: <b>{total_price} ₽</b>.\n\n"
             "Выберите способ оплаты:",
+            parse_mode=ParseMode.HTML,
             reply_markup=renewal_payment_choice_keyboard(months),
         )
         return True
@@ -3386,7 +3390,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "subscription":
         if value == "renew":
             context.user_data["client_waiting_renew_months"] = True
-            await query.message.reply_text(f"На сколько месяцев хотите продлить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+            await query.message.reply_text(
+                f"На сколько месяцев хотите продлить подписку?\n"
+                f"Цена: <b>{user_monthly_price(user.id)} ₽/мес.</b>\n"
+                f"Введите число от 1 до {XUI_MAX_RENEW_MONTHS}.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=client_main_keyboard(),
+            )
         elif value == "buy":
             context.user_data["client_waiting_subscribe_months"] = True
             await query.message.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
