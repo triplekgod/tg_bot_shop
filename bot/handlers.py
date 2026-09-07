@@ -1209,9 +1209,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if await handle_client_menu_button(update, context):
         return
 
-    context.user_data.pop("client_waiting_ticket_text", None)
-
-    ticket_id = get_or_create_open_ticket(user.id)
+    create_new_ticket = bool(context.user_data.pop("client_waiting_ticket_text", None))
+    ticket_id = create_ticket(user.id) if create_new_ticket else get_latest_open_ticket(user.id)
+    if not ticket_id:
+        await message.reply_text(
+            "Чтобы создать обращение, откройте «💬 Обращения» и нажмите «➕ Новое обращение».",
+            reply_markup=client_main_keyboard(),
+        )
+        return
     log_message(
         ticket_id=ticket_id,
         direction="user_to_admin",
@@ -3210,6 +3215,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("admin_recording_subscription_messages", None)
     context.user_data.pop("client_waiting_subscribe_months", None)
     context.user_data.pop("client_subscribe_months", None)
+    context.user_data.pop("client_waiting_ticket_text", None)
     await update.message.reply_text("Действие отменено.")
 
 

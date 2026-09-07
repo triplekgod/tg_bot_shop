@@ -26,6 +26,16 @@ def get_or_create_open_ticket(user_id: int) -> int:
     return create_ticket(user_id)
 
 
+def get_latest_open_ticket(user_id: int) -> Optional[int]:
+    """Последнее открытое обращение без неявного создания нового."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id FROM tickets WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def get_ticket(ticket_id: int) -> Optional[sqlite3.Row]:
     with db() as conn:
         return conn.execute(
