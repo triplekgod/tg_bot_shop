@@ -1083,7 +1083,8 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
                 )
                 return True
             await message.reply_text(
-                "📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.",
+                f"📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.\nЦена: <b>{user_monthly_price(user.id)} ₽/мес.</b>",
+                parse_mode=ParseMode.HTML,
                 reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user.id)),
             )
             return True
@@ -1179,9 +1180,13 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
 
         context.user_data.pop("client_waiting_subscribe_months", None)
         context.user_data["client_subscribe_months"] = months
+        monthly_price = user_monthly_price(user.id)
+        total_price = months * monthly_price
         await message.reply_text(
-            f"Вы выбрали оформление подписки на {month_word(months)}.\n\n"
+            f"Вы выбрали оформление подписки на {month_word(months)}.\n"
+            f"Цена: <b>{monthly_price} ₽/мес.</b> · Итого: <b>{total_price} ₽</b>.\n\n"
             "Выберите способ оплаты:",
+            parse_mode=ParseMode.HTML,
             reply_markup=subscription_payment_choice_keyboard(months),
         )
         return True
@@ -2262,8 +2267,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             SELECT u.user_id, u.username, u.first_name, u.last_name, u.is_banned, u.updated_at,
                    COALESCE(b.balance, 0) AS balance,
                    COALESCE(rc.referrals_count, 0) AS referrals_count,
-                   r.referrer_user_id,
-                   x.xui_email
+                   r.referrer_user_id
             FROM users u
             LEFT JOIN (
                 SELECT user_id, SUM(amount) AS balance FROM balance_transactions GROUP BY user_id
@@ -2272,7 +2276,6 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 SELECT referrer_user_id, COUNT(*) AS referrals_count FROM referrals GROUP BY referrer_user_id
             ) rc ON rc.referrer_user_id = u.user_id
             LEFT JOIN referrals r ON r.referral_user_id = u.user_id
-            LEFT JOIN xui_links x ON x.telegram_user_id = u.user_id
             ORDER BY u.updated_at DESC
             LIMIT 20
             """
@@ -2281,13 +2284,6 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Пользователей пока нет.")
         return
 
-    try:
-        async with XuiClient() as api:
-            online_emails = await api.get_online_client_emails()
-    except XuiApiError as exc:
-        logger.warning("Не удалось получить онлайн-клиентов для списка пользователей: %s", exc)
-        online_emails = set()
-
     lines = ["Выберите пользователя:"]
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
@@ -2295,12 +2291,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         banned = " 🚫" if row["is_banned"] else ""
         referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
         lines.append(f"{row['user_id']} — {name} ({username}){banned}")
-    keyboard = []
-    for row in rows:
-        email = str(row["xui_email"] or "").strip().casefold()
-        presence = "🟢" if email and email in online_emails else "🔴"
-        blocked = "🚫 " if row["is_banned"] else ""
-        keyboard.append([InlineKeyboardButton(f"{presence} {blocked}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")])
+    keyboard = [[InlineKeyboardButton(f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -3724,10 +3715,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         email = get_xui_link(target_user_id) or "не привязан"
         price = user_monthly_price(target_user_id)
         subscription_line = "Подписка: не привязана"
+        online_line = "Онлайн: —"
+        last_online_line = "Последняя активность: —"
         if email != "не привязан":
             try:
                 async with XuiClient() as api:
                     summary = await api.get_client_summary(email)
+                    online_emails = await api.get_online_client_emails()
+                    last_online_by_email = await api.get_client_last_online()
                 if summary:
                     expiry_ms = safe_int(summary.get("expiry_ms"))
                     enabled = bool(summary.get("enabled", True))
@@ -3736,13 +3731,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     subscription_line = f"Подписка: {subscription_state} · до {format_xui_datetime(expiry_ms)}"
                 else:
                     subscription_line = "Подписка: не найдена в 3x-ui"
+                email_key = email.strip().casefold()
+                online_line = "Онлайн: 🟢 в сети" if email_key in online_emails else "Онлайн: 🔴 не в сети"
+                last_online = safe_int(last_online_by_email.get(email_key))
+                if 0 < last_online < 10_000_000_000:
+                    last_online *= 1000
+                if last_online:
+                    last_online_line = f"Последняя активность: {format_xui_datetime(last_online)}"
             except XuiApiError as exc:
                 logger.warning("Не удалось получить подписку пользователя %s: %s", target_user_id, exc)
                 subscription_line = "Подписка: не удалось проверить в 3x-ui"
+                online_line = "Онлайн: не удалось проверить"
         text = (f"👤 Пользователь {target_user_id}\n{target['first_name'] or ''} {target['last_name'] or ''}\n{username}\n\n"
                 f"Email 3x-ui: {email}\n"
                 f"Статус: {'🚫 заблокирован' if target['is_banned'] else '✅ активен'}\n"
                 f"{subscription_line}\n"
+                f"{online_line}\n{last_online_line}\n"
                 f"Баланс: {balance_of(target_user_id)} ₽\nЦена: {price} ₽/мес.\nРефералов: {count}\nЗаработано: {earned} ₽\n"
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         buttons = [

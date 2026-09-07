@@ -502,6 +502,27 @@ class XuiClient:
 
         raise last_error or XuiApiError("Не удалось получить список подключённых клиентов")
 
+    async def get_client_last_online(self) -> dict[str, int]:
+        """Вернуть время последней активности клиентов по email."""
+        last_error: XuiApiError | None = None
+        for endpoint in ("/panel/api/clients/lastOnline", "/panel/api/inbounds/lastOnline"):
+            try:
+                data = await self.request("POST", endpoint)
+            except XuiApiError as exc:
+                last_error = exc
+                continue
+            obj = data.get("obj", data) if isinstance(data, dict) else data
+            if not isinstance(obj, dict):
+                return {}
+            result: dict[str, int] = {}
+            for email, timestamp in obj.items():
+                try:
+                    result[str(email).strip().casefold()] = int(timestamp or 0)
+                except (TypeError, ValueError):
+                    continue
+            return result
+        raise last_error or XuiApiError("Не удалось получить время последней активности клиентов")
+
     async def restart_xray(self) -> None:
         await self.request("POST", "/panel/api/server/restartXrayService")
 
