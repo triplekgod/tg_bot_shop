@@ -3589,8 +3589,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(f"Администратор {target_admin_id} удалён.", reply_markup=admin_management_keyboard())
         return
 
-    if action in {"userlink", "userdetail", "userban", "userbalance", "userref", "userprice", "userrenew", "userrenewmanual", "userrenewrequest", "userrenewrequestticket", "userdelete", "userdeletecancel"} and not is_admin(user.id):
+    if action in {"userlink", "userdetail", "userban", "userbalance", "userref", "userprice", "userlogs", "userrenew", "userrenewmanual", "userrenewrequest", "userrenewrequestticket", "userdelete", "userdeletecancel"} and not is_admin(user.id):
         await query.message.reply_text("Это действие доступно только администраторам.")
+        return
+
+    if action == "userlogs":
+        try:
+            target_user_id = int(value)
+        except ValueError:
+            return
+        email = get_xui_link(target_user_id)
+        if not email:
+            await query.message.reply_text("У пользователя нет привязанного email 3x-ui.")
+            return
+        try:
+            async with XuiClient() as api:
+                lines = await api.get_xray_log_lines()
+        except XuiApiError as exc:
+            await query.message.reply_text(f"Не удалось получить Xray-логи: {exc}")
+            return
+
+        email_key = email.casefold()
+        matched = [line for line in lines if email_key in line.casefold()]
+        if not matched:
+            await query.message.reply_text(
+                f"В последних {len(lines)} строках Xray-лога основной панели нет записей клиента <code>{html.escape(email)}</code>.\n\n"
+                "Это возможно, если клиент подключался давно, access-log не содержит email или использовал удалённую ноду.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        recent = matched[-25:]
+        log_text = "\n".join(recent)
+        if len(log_text) > 3300:
+            log_text = log_text[-3300:]
+        await query.message.reply_text(
+            f"📥 Xray-лог клиента <code>{html.escape(email)}</code> — основная панель\n"
+            "В строках Xray обычно указаны IP клиента после <code>from</code> и адрес назначения после <code>accepted</code>.\n\n"
+            f"<pre>{html.escape(log_text)}</pre>\n\n"
+            "Логи удалённых нод основная панель 3x-ui через API не проксирует; для них нужен отдельный доступ к каждой ноде.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if action == "userrenew":
@@ -3751,6 +3789,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Пригласил: {ref['referrer_user_id'] if ref else 'нет'}")
         buttons = [
             [InlineKeyboardButton("🔗 Привязать email", callback_data=f"userlink:{target_user_id}")],
+            [InlineKeyboardButton("📥 Выгрузка логов", callback_data=f"userlogs:{target_user_id}")],
             [InlineKeyboardButton("🔄 Продлить подписку", callback_data=f"userrenew:{target_user_id}")],
             [InlineKeyboardButton("💰 Изменить баланс", callback_data=f"userbalance:{target_user_id}"), InlineKeyboardButton("🏷 Цена/мес.", callback_data=f"userprice:{target_user_id}")],
             [InlineKeyboardButton("👥 Изменить реферера", callback_data=f"userref:{target_user_id}")],

@@ -523,6 +523,19 @@ class XuiClient:
             return result
         raise last_error or XuiApiError("Не удалось получить время последней активности клиентов")
 
+    async def get_xray_log_lines(self, count: int = 500) -> list[str]:
+        """Последние строки Xray access/error log основной панели."""
+        count = max(1, min(int(count), 2000))
+        data = await self.request("POST", f"/panel/api/server/xraylogs/{count}")
+        obj = data.get("obj", data) if isinstance(data, dict) else data
+        if isinstance(obj, str):
+            return [line for line in obj.splitlines() if line.strip()]
+        if isinstance(obj, dict):
+            obj = next((obj[key] for key in ("logs", "lines", "data") if isinstance(obj.get(key), (list, str))), [])
+            if isinstance(obj, str):
+                return [line for line in obj.splitlines() if line.strip()]
+        return [str(line) for line in obj if str(line).strip()] if isinstance(obj, list) else []
+
     async def restart_xray(self) -> None:
         await self.request("POST", "/panel/api/server/restartXrayService")
 
