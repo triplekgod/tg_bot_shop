@@ -2419,12 +2419,52 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @require_admin
 async def topups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db() as conn:
-        rows = conn.execute("SELECT id, user_id, amount, method FROM balance_topups WHERE status = 'pending' ORDER BY id DESC LIMIT 30").fetchall()
+        pending_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status = 'pending'").fetchone()[0])
+        history_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status != 'pending'").fetchone()[0])
+    await update.message.reply_text(
+        "💳 Пополнения\nВыберите список:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🕐 Текущие ({pending_count})", callback_data="topups:pending:1")],
+            [InlineKeyboardButton(f"🗂 История ({history_count})", callback_data="topups:history:1")],
+        ]),
+    )
+
+
+async def show_topups_page(message, kind: str, page: int) -> None:
+    """Список текущих или завершённых заявок на пополнение для администратора."""
+    kind = "pending" if kind == "pending" else "history"
+    page = max(1, page)
+    where = "status = 'pending'" if kind == "pending" else "status != 'pending'"
+    per_page = 12
+    with db() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) FROM balance_topups WHERE {where}").fetchone()[0])
+        rows = conn.execute(
+            f"SELECT id, user_id, amount, method, status, created_at FROM balance_topups WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            (per_page, (page - 1) * per_page),
+        ).fetchall()
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, pages)
+    title = "🕐 Текущие пополнения" if kind == "pending" else "🗂 История пополнений"
     if not rows:
-        await update.message.reply_text("Активных заявок на пополнение нет.", reply_markup=admin_main_keyboard())
+        await message.reply_text(f"{title}\n\nЗаписей нет.")
         return
-    buttons = [[InlineKeyboardButton(f"#{row['id']} · {row['amount']} ₽ · {row['method']}", callback_data=f"topupshow:{row['id']}")] for row in rows]
-    await update.message.reply_text("💳 Ожидают проверки:", reply_markup=InlineKeyboardMarkup(buttons))
+    status_icon = {"pending": "🕐", "confirmed": "✅", "cancelled": "❌"}
+    buttons = [
+        [InlineKeyboardButton(
+            f"{status_icon.get(str(row['status']), '•')} #{row['id']} · {row['amount']} ₽ · {row['method']} · {row['user_id']}",
+            callback_data=f"topupshow:{row['id']}",
+        )]
+        for row in rows
+    ]
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"topups:{kind}:{page - 1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"topups:{kind}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("↩️ К спискам", callback_data="topupsmenu:show")])
+    await message.reply_text(f"{title}\nСтраница {page}/{pages} · всего: {total}", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @require_admin
@@ -3299,6 +3339,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    if action == "topupsmenu":
+        if not is_admin(user.id) or value != "show":
+            return
+        with db() as conn:
+            pending_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status = 'pending'").fetchone()[0])
+            history_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status != 'pending'").fetchone()[0])
+        await query.message.reply_text(
+            "💳 Пополнения\nВыберите список:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🕐 Текущие ({pending_count})", callback_data="topups:pending:1")],
+                [InlineKeyboardButton(f"🗂 История ({history_count})", callback_data="topups:history:1")],
+            ]),
+        )
+        return
+
+    if action == "topups":
+        if not is_admin(user.id):
+            await query.message.reply_text("Список пополнений доступен только администраторам.")
+            return
+        try:
+            kind, page_raw = value.split(":", 1)
+            page = int(page_raw)
+        except ValueError:
+            return
+        await show_topups_page(query.message, kind, page)
+        return
+
     if action == "topupdetails":
         if not is_admin(user.id):
             await query.message.reply_text("Реквизиты может отправить только администратор.")
@@ -3896,17 +3963,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if action == "topupshow":
+        if not is_admin(user.id):
+            await query.message.reply_text("Просмотр пополнений доступен только администраторам.")
+            return
         try:
             topup_id = int(value)
         except ValueError:
             return
         topup = get_balance_topup(topup_id)
-        if not topup or str(topup["status"]) != "pending":
-            await query.message.reply_text("Заявка уже обработана или не найдена.")
+        if not topup:
+            await query.message.reply_text("Заявка не найдена.")
             return
+        status_text = {"pending": "🕐 ожидает проверки", "confirmed": "✅ зачислено", "cancelled": "❌ отменено"}.get(str(topup["status"]), str(topup["status"]))
+        details = (
+            f"💳 Пополнение #{topup_id}\n"
+            f"Клиент: {topup['user_id']}\nСумма: {topup['amount']} ₽\n"
+            f"Способ: {topup['method']}\nСтатус: {status_text}\n"
+            f"Создано: {topup['created_at']}"
+        )
+        if topup["confirmed_at"]:
+            details += f"\nОбработано: {topup['confirmed_at']} · администратор: {topup['confirmed_by'] or 'автоматически'}"
         await query.message.reply_text(
-            f"💳 Пополнение #{topup_id}\nКлиент: {topup['user_id']}\nСумма: {topup['amount']} ₽\nСпособ: {topup['method']}",
-            reply_markup=balance_topup_confirm_keyboard(topup_id),
+            details,
+            reply_markup=balance_topup_confirm_keyboard(topup_id) if str(topup["status"]) == "pending" else None,
         )
         return
 
