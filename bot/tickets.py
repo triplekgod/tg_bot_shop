@@ -324,27 +324,15 @@ def format_ticket_history_page(rows: list[sqlite3.Row], page: int, pages: int, t
     if not rows:
         return "История обращений пока пустая.", None
 
-    lines = [
-        f"📚 История обращений: {total}",
-        f"Страница {page}/{pages}",
-        "",
-        "Нажмите на обращение, чтобы открыть полный чат.",
-    ]
+    lines = [f"📚 История обращений: {total}", f"Страница {page}/{pages}", "", "Выберите обращение:"]
     keyboard_rows: list[list[InlineKeyboardButton]] = []
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
         status = str(row["status"])
         icon = "🟢" if status == "open" else "⚪"
-        last = html.escape((row["last_text"] or "без текста")[:70])
-        messages_count = int(row["messages_count"] or 0)
-        lines.append(
-            f"{icon} #{row['id']} — {html.escape(name)} ({row['user_id']})\n"
-            f"   Статус: <code>{html.escape(status)}</code>, сообщений: <code>{messages_count}</code>\n"
-            f"   Последнее: {last}"
-        )
         keyboard_rows.append([
             InlineKeyboardButton(
-                f"{icon} #{row['id']} — {name[:22]}",
+                f"{icon} #{row['id']} · {name[:18]} · {row['messages_count']} сообщ.",
                 callback_data=f"historyticket:{row['id']}",
             )
         ])
@@ -821,19 +809,20 @@ def format_subscription_requests_page(rows: list[sqlite3.Row], page: int, pages:
 def list_subscription_events(page: int = 1, per_page: int = RENEWAL_REQUESTS_PER_PAGE) -> tuple[list[sqlite3.Row], int, int, int]:
     """Единая история покупок и продлений: Stars, баланс и старые заявки."""
     source = """
-        SELECT 'renewal' AS event_type, rr.ticket_id, rr.telegram_user_id, rr.months, rr.days,
+        SELECT 'renewal_request' AS source, rr.ticket_id AS record_id, 'renewal' AS event_type, rr.ticket_id, rr.telegram_user_id, rr.months, rr.days,
                rr.status, rr.payment_method, rr.price_rub, rr.stars_amount,
                COALESCE(rr.renewed_at, rr.created_at) AS event_at, NULL AS note,
                u.username, u.first_name, u.last_name
         FROM renewal_requests rr JOIN users u ON u.user_id = rr.telegram_user_id
         UNION ALL
-        SELECT 'subscription' AS event_type, sr.ticket_id, sr.telegram_user_id, sr.months, sr.days,
+        SELECT 'subscription_request' AS source, sr.ticket_id AS record_id, 'subscription' AS event_type, sr.ticket_id, sr.telegram_user_id, sr.months, sr.days,
                sr.status, sr.payment_method, sr.price_rub, sr.stars_amount,
                COALESCE(sr.created_at_panel, sr.created_at) AS event_at, NULL AS note,
                u.username, u.first_name, u.last_name
         FROM subscription_requests sr JOIN users u ON u.user_id = sr.telegram_user_id
         UNION ALL
-        SELECT CASE WHEN bt.note LIKE 'Продление%' THEN 'renewal' ELSE 'subscription' END AS event_type,
+        SELECT 'balance_transaction' AS source, bt.id AS record_id,
+               CASE WHEN bt.note LIKE 'Продление%' THEN 'renewal' ELSE 'subscription' END AS event_type,
                NULL AS ticket_id, bt.user_id, NULL AS months, NULL AS days,
                'completed' AS status, 'balance' AS payment_method, -bt.amount AS price_rub,
                NULL AS stars_amount, bt.created_at AS event_at, bt.note,
@@ -857,28 +846,17 @@ def format_subscription_events_page(rows: list[sqlite3.Row], page: int, pages: i
         return "Операций оформления и продления пока нет.", None
     labels = {"renewal": "🔄 Продление", "subscription": "🆕 Оформление"}
     status_labels = {"pending": "🕐 ожидает", "renewed": "✅ выполнено", "created": "✅ выполнено", "completed": "✅ выполнено", "rejected": "❌ отменено"}
-    lines = [f"📋 Оформления и продления: {total}", f"Страница {page}/{pages}", ""]
+    lines = [f"📋 Оформления и продления: {total}", f"Страница {page}/{pages}", "", "Выберите операцию:"]
     buttons: list[list[InlineKeyboardButton]] = []
     for row in rows:
         name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
-        handle = f"@{row['username']}" if row["username"] else "без username"
         kind = str(row["event_type"])
         status = str(row["status"])
-        duration = f"{row['months']} мес. ({row['days']} дн.)" if row["months"] else "—"
-        method = str(row["payment_method"] or "manual")
-        method_text = "внутренний баланс" if method == "balance" else payment_method_label(method)
-        price = f"{row['price_rub']} ₽" if row["price_rub"] is not None else "не сохранена"
-        if row["stars_amount"] is not None:
-            price += f" · {row['stars_amount']} ⭐"
-        note = f"\n   Детали: <code>{html.escape(str(row['note']))}</code>" if row["note"] else ""
-        lines.append(
-            f"{labels.get(kind, kind)} · {status_labels.get(status, status)}\n"
-            f"   Клиент: <a href=\"tg://user?id={row['telegram_user_id']}\">{html.escape(name)}</a> ({html.escape(handle)}), <code>{row['telegram_user_id']}</code>\n"
-            f"   Когда: <code>{html.escape(str(row['event_at']))}</code> · срок: <code>{duration}</code>\n"
-            f"   Цена: <code>{price}</code> · способ: <code>{html.escape(method_text)}</code>{note}"
-        )
-        if row["ticket_id"]:
-            buttons.append([InlineKeyboardButton(f"Подробнее: #{row['ticket_id']} · {name[:22]}", callback_data=f"ticket:{row['ticket_id']}")])
+        icon = "🕐" if status == "pending" else "✅" if status in {"renewed", "created", "completed"} else "❌"
+        buttons.append([InlineKeyboardButton(
+            f"{icon} {labels.get(kind, kind)} · {name[:18]} · {row['price_rub'] or '?'} ₽",
+            callback_data=f"subevent:{row['source']}:{row['record_id']}:{page}",
+        )])
     nav: list[InlineKeyboardButton] = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"subevents:{page - 1}"))
@@ -887,6 +865,57 @@ def format_subscription_events_page(rows: list[sqlite3.Row], page: int, pages: i
     if nav:
         buttons.append(nav)
     return "\n\n".join(lines), InlineKeyboardMarkup(buttons) if buttons else None
+
+
+def get_subscription_event_detail(source: str, record_id: int) -> Optional[str]:
+    """Подробности одной операции для кнопки журнала."""
+    with db() as conn:
+        if source == "renewal_request":
+            row = conn.execute(
+                """SELECT rr.*, u.username, u.first_name, u.last_name FROM renewal_requests rr
+                   JOIN users u ON u.user_id = rr.telegram_user_id WHERE rr.ticket_id = ?""", (record_id,)
+            ).fetchone()
+            event_type = "🔄 Продление"
+            event_at = (row["renewed_at"] or row["created_at"]) if row else None
+        elif source == "subscription_request":
+            row = conn.execute(
+                """SELECT sr.*, u.username, u.first_name, u.last_name FROM subscription_requests sr
+                   JOIN users u ON u.user_id = sr.telegram_user_id WHERE sr.ticket_id = ?""", (record_id,)
+            ).fetchone()
+            event_type = "🆕 Оформление"
+            event_at = (row["created_at_panel"] or row["created_at"]) if row else None
+        elif source == "balance_transaction":
+            row = conn.execute(
+                """SELECT bt.*, u.username, u.first_name, u.last_name FROM balance_transactions bt
+                   JOIN users u ON u.user_id = bt.user_id WHERE bt.id = ? AND bt.kind = 'subscription_payment'""", (record_id,)
+            ).fetchone()
+            event_type = "🔄 Продление" if row and str(row["note"]).startswith("Продление") else "🆕 Оформление"
+            event_at = row["created_at"] if row else None
+        else:
+            return None
+    if not row:
+        return None
+    user_id = int(row["telegram_user_id"] if "telegram_user_id" in row.keys() else row["user_id"])
+    name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
+    username = f"@{row['username']}" if row["username"] else "без username"
+    method = "внутренний баланс" if source == "balance_transaction" else payment_method_label(row["payment_method"])
+    price_value = -int(row["amount"]) if source == "balance_transaction" else row["price_rub"]
+    price = f"{price_value} ₽" if price_value is not None else "не сохранена"
+    if source != "balance_transaction" and row["stars_amount"] is not None:
+        price += f" · {row['stars_amount']} ⭐"
+    duration = "—" if source == "balance_transaction" else f"{row['months']} мес. ({row['days']} дн.)"
+    status = "✅ выполнено" if source == "balance_transaction" else str(row["status"])
+    text = (
+        f"{event_type}\n\nКлиент: <a href=\"tg://user?id={user_id}\">{html.escape(name)}</a> ({html.escape(username)})\n"
+        f"Telegram ID: <code>{user_id}</code>\nКогда: <code>{html.escape(str(event_at))}</code>\n"
+        f"Срок: <code>{duration}</code>\nЦена: <code>{price}</code>\n"
+        f"Способ оплаты: <code>{html.escape(method)}</code>\nСтатус: <code>{html.escape(status)}</code>"
+    )
+    if source == "balance_transaction":
+        text += f"\nДетали: <code>{html.escape(str(row['note'] or ''))}</code>"
+    else:
+        text += f"\nОбращение: <code>#{record_id}</code>"
+    return text
 
 
 def user_display_from_row(row: sqlite3.Row) -> str:

@@ -2415,15 +2415,11 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Пользователей пока нет.")
         return
 
-    lines = ["Выберите пользователя:"]
-    for row in rows:
-        name = " ".join(filter(None, [row["first_name"], row["last_name"]])).strip() or "Без имени"
-        username = f"@{row['username']}" if row["username"] else "без username"
-        banned = " 🚫" if row["is_banned"] else ""
-        referrer = f"; пришёл от {row['referrer_user_id']}" if row["referrer_user_id"] else ""
-        lines.append(f"{row['user_id']} — {name} ({username}){banned}")
-    keyboard = [[InlineKeyboardButton(f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}", callback_data=f"userdetail:{row['user_id']}")] for row in rows]
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(
+        f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}",
+        callback_data=f"userdetail:{row['user_id']}",
+    )] for row in rows]
+    await update.message.reply_text("👤 Пользователи\nВыберите клиента:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 @require_admin
@@ -4143,6 +4139,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         rows, page, pages, total = list_subscription_requests(page)
         text, keyboard = format_subscription_requests_page(rows, page, pages, total)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    elif action == "subevent":
+        try:
+            source, record_id_raw, page_raw = value.split(":", 2)
+            record_id, page = int(record_id_raw), int(page_raw)
+        except ValueError:
+            await query.message.reply_text("Некорректная операция.")
+            return
+        text = get_subscription_event_detail(source, record_id)
+        if not text:
+            await query.message.reply_text("Операция не найдена.")
+            return
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К списку", callback_data=f"subevents:{page}")]]),
+        )
 
     elif action == "subevents":
         try:
