@@ -2259,6 +2259,64 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"Пользователь {user_id} разблокирован.")
 
 
+_XRAY_REVERSE_DNS_CACHE: dict[str, str] = {}
+_XRAY_SOURCE_RE = re.compile(r"\bfrom\s+(?:tcp:|udp:)?(?:\[)?(?P<host>[0-9a-fA-F:.]+)(?:\])?:(?P<port>\d+)", re.IGNORECASE)
+_XRAY_DESTINATION_RE = re.compile(r"\baccepted\s+(?P<protocol>[a-z0-9_-]+):(?:\[)?(?P<host>[^\s\]:]+|[0-9a-fA-F:.]+)(?:\])?:(?P<port>\d+)", re.IGNORECASE)
+_XRAY_TIMESTAMP_RE = re.compile(r"^(?P<time>\d{4}[/-]\d{2}[/-]\d{2}[ T]\d{2}:\d{2}:\d{2})")
+
+
+def _xray_is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+async def _xray_reverse_dns(ip: str) -> str:
+    if ip in _XRAY_REVERSE_DNS_CACHE:
+        return _XRAY_REVERSE_DNS_CACHE[ip]
+    try:
+        name, _, _ = await asyncio.wait_for(asyncio.to_thread(socket.gethostbyaddr, ip), timeout=2.0)
+    except (OSError, TimeoutError, asyncio.TimeoutError):
+        name = ""
+    _XRAY_REVERSE_DNS_CACHE[ip] = name.rstrip(".")
+    return _XRAY_REVERSE_DNS_CACHE[ip]
+
+
+async def format_client_xray_logs(lines: list[str]) -> str:
+    """Свести типичные Xray access-log строки к читаемой форме."""
+    parsed: list[tuple[str, str, str, str, str, str]] = []
+    for line in lines[-20:]:
+        source = _XRAY_SOURCE_RE.search(line)
+        destination = _XRAY_DESTINATION_RE.search(line)
+        timestamp = _XRAY_TIMESTAMP_RE.search(line)
+        if source and destination:
+            parsed.append((
+                timestamp.group("time") if timestamp else "Время не указано",
+                source.group("host"), source.group("port"),
+                destination.group("protocol").upper(), destination.group("host"), destination.group("port"),
+            ))
+
+    reverse_ips = list(dict.fromkeys(destination for _, _, _, _, destination, _ in parsed if _xray_is_ip(destination)))[:10]
+    reverse_names = await asyncio.gather(*(_xray_reverse_dns(ip) for ip in reverse_ips)) if reverse_ips else []
+    host_names = dict(zip(reverse_ips, reverse_names))
+
+    readable: list[str] = []
+    for timestamp, source_ip, source_port, protocol, destination, destination_port in parsed:
+        service = host_names.get(destination, "") if _xray_is_ip(destination) else destination
+        service_line = f"\n  Сервис: {service}" if service else ""
+        readable.append(
+            f"• {timestamp}\n"
+            f"  Клиент: {source_ip}:{source_port}\n"
+            f"  Назначение: {destination}:{destination_port} · {protocol}{service_line}"
+        )
+
+    if readable:
+        return "\n\n".join(readable)
+    return "\n".join(f"• {line}" for line in lines[-8:])
+
+
 @require_admin
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db() as conn:
@@ -3618,15 +3676,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 parse_mode=ParseMode.HTML,
             )
             return
-        recent = matched[-25:]
-        log_text = "\n".join(recent)
+        log_text = await format_client_xray_logs(matched)
         if len(log_text) > 3300:
             log_text = log_text[-3300:]
         await query.message.reply_text(
             f"📥 Xray-лог клиента <code>{html.escape(email)}</code> — основная панель\n"
-            "В строках Xray обычно указаны IP клиента после <code>from</code> и адрес назначения после <code>accepted</code>.\n\n"
+            "Показаны IP клиента, адрес назначения и имя сервиса, если reverse DNS смог его определить.\n\n"
             f"<pre>{html.escape(log_text)}</pre>\n\n"
-            "Логи удалённых нод основная панель 3x-ui через API не проксирует; для них нужен отдельный доступ к каждой ноде.",
+            "Имя по IP — ориентир: CDN и некоторые сервисы не публикуют PTR-запись. Логи удалённых нод основная панель 3x-ui через API не проксирует; для них нужен отдельный доступ к каждой ноде.",
             parse_mode=ParseMode.HTML,
         )
         return
