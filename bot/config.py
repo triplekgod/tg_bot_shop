@@ -31,6 +31,7 @@ from telegram.ext import (
 )
 
 ENV_FILE = Path(find_dotenv() or (Path(__file__).resolve().parents[1] / ".env")).resolve()
+INHERITED_ENVIRONMENT = dict(os.environ)
 load_dotenv(ENV_FILE)
 
 

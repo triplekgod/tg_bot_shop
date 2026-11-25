@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Awaitable
 from weakref import WeakValueDictionary
 
@@ -11,7 +12,9 @@ from .database import *
 from .env_settings import (
     ENV_SETTING_GROUP_BY_KEY,
     ENV_SETTING_GROUPS,
+    check_restart_config,
     env_display_value,
+    env_for_restart,
     env_key_reference,
     env_setting_descriptions,
     env_settings_values,
@@ -206,8 +209,9 @@ async def show_env_settings(
             [InlineKeyboardButton(label, callback_data=f"envsettings:group:{code}:1")]
             for code, (label, _) in ENV_SETTING_GROUPS.items() if code in available_groups
         ]
+        rows.append([InlineKeyboardButton("✅ Применить изменения", callback_data="envsettings:apply")])
         await screen.reply_text(
-            "⚙️ Настройки .env\n\nВыберите раздел.",
+            f"{notice}⚙️ Настройки .env\n\nВыберите раздел.",
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return
@@ -244,11 +248,12 @@ async def show_env_settings(
         navigation.append(InlineKeyboardButton("➡️", callback_data=f"envsettings:group:{group}:{page + 1}"))
     if navigation:
         rows.append(navigation)
+    rows.append([InlineKeyboardButton("✅ Применить изменения", callback_data="envsettings:apply")])
     rows.append([InlineKeyboardButton("⬅️ К разделам", callback_data="envsettings:list")])
     current_values = "\n\n".join(lines)
     await screen.reply_text(
         f"{notice}⚙️ {title} · {page}/{pages}\n\n{current_values}\n\n"
-        "Изменения применятся после перезапуска бота.",
+        "Нажмите «Применить изменения», чтобы перезапустить бота с сохранёнными настройками.",
         reply_markup=InlineKeyboardMarkup(rows),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -284,7 +289,28 @@ async def apply_env_setting(screen: MenuScreen, key: str, value: str) -> None:
         await show_env_input(screen, key, error=f"{exc}\n\n")
         return
     screen.context.user_data.pop("env_edit_setting", None)
+    screen.context.application.bot_data.setdefault("edited_env_keys", set()).add(key)
     await show_env_settings(screen, selected_key=key, notice=f"✅ {env_display_value(key, 56)} сохранено.\n\n")
+
+
+async def request_env_restart(screen: MenuScreen) -> None:
+    application = screen.context.application
+    if "restart_environment" in application.bot_data:
+        return
+    edited_keys = application.bot_data.get("edited_env_keys", set())
+    environment = env_for_restart(edited_keys)
+    try:
+        valid = await check_restart_config(environment, check_token="BOT_TOKEN" in edited_keys)
+    except (OSError, asyncio.TimeoutError):
+        await show_env_settings(screen, notice="⚠️ Проверка настроек не завершилась. Бот продолжает работать.\n\n")
+        return
+    if not valid:
+        await show_env_settings(screen, notice="⚠️ Новые настройки не прошли проверку. Проверьте .env.\n\n")
+        return
+
+    await screen.reply_text("Перезапускаю бота, чтобы применить сохранённые настройки.")
+    application.bot_data["restart_environment"] = environment
+    application.stop_running()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3835,6 +3861,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if operation == "list":
             clear_pending_input(context)
             await show_env_settings(screen)
+        elif operation == "apply" and screen.message.message_id in screen.message_ids:
+            clear_pending_input(context)
+            await request_env_restart(screen)
         elif operation == "group":
             group, _, page = argument.partition(":")
             if group in ENV_SETTING_GROUPS and page.isdecimal():
@@ -5212,6 +5241,9 @@ def main() -> None:
     app = build_app()
     logger.info("Бот техподдержки запущен")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+    environment = app.bot_data.get("restart_environment")
+    if environment is not None:
+        os.execve(sys.executable, [sys.executable, *sys.orig_argv[1:]], environment)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from zipfile import ZipFile
 
 from dotenv import dotenv_values
 
-from bot import backup, env_settings
+from bot import backup, env_settings, handlers
 
 
 class BackupTests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +72,29 @@ class BackupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvSettingsTests(unittest.TestCase):
+    def test_restart_reloads_edited_bot_keys_and_keeps_system_environment(self):
+        inherited = {"XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE": "old", "PATH": "/system", "ADMIN_IDS": "1"}
+        with patch.object(env_settings, "INHERITED_ENVIRONMENT", inherited):
+            self.assertEqual(
+                env_settings.env_for_restart({"XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE", "PATH"}),
+                {"PATH": "/system", "ADMIN_IDS": "1"},
+            )
+        self.assertEqual(inherited["XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE"], "old")
+
+    def test_main_restarts_same_python_command_after_polling_stops(self):
+        app = Mock(bot_data={"restart_environment": {"KEEP": "1"}})
+        with (
+            patch.object(handlers, "init_db"),
+            patch.object(handlers, "build_app", return_value=app),
+            patch.object(handlers.os, "execve") as execve,
+            patch.object(handlers.sys, "orig_argv", ["python", "-m", "bot.handlers"]),
+        ):
+            handlers.main()
+        app.run_polling.assert_called_once()
+        execve.assert_called_once_with(
+            handlers.sys.executable, [handlers.sys.executable, "-m", "bot.handlers"], {"KEEP": "1"},
+        )
+
     def test_all_supported_settings_have_descriptions(self):
         self.assertEqual(set(env_settings.EDITABLE_ENV_KEYS), env_settings.ENV_DESCRIPTIONS.keys())
         self.assertTrue(all(env_settings.ENV_DESCRIPTIONS.values()))

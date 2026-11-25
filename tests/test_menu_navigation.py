@@ -4,7 +4,7 @@ import unittest
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram import CallbackQuery, Chat, Message, ReplyKeyboardMarkup, Update, User
 from telegram.error import BadRequest
@@ -37,7 +37,11 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             args=[],
             user_data={},
             chat_data={},
-            application=SimpleNamespace(create_task=lambda coroutine, **_: asyncio.create_task(coroutine)),
+            application=SimpleNamespace(
+                bot_data={},
+                create_task=lambda coroutine, **_: asyncio.create_task(coroutine),
+                stop_running=Mock(),
+            ),
             bot=SimpleNamespace(
                 username="shop_test_bot",
                 delete_message=AsyncMock(),
@@ -404,7 +408,9 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Выберите раздел", self.reply_text.await_args.args[0])
             self.assertNotIn("test-token-value", self.reply_text.await_args.args[0])
             groups = {row[0].text: row[0].callback_data for row in self.last_reply_markup.inline_keyboard}
-            self.assertEqual(list(groups), ["Подключение к 3x-ui", "Баланс и рефералы", "Дополнительные переменные"])
+            self.assertEqual(list(groups), [
+                "Подключение к 3x-ui", "Баланс и рефералы", "Дополнительные переменные", "✅ Применить изменения",
+            ])
 
             await self.click(1, groups["Дополнительные переменные"])
             self.assertIn("CUSTOM_PARAMETER = custom-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
@@ -428,7 +434,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("env_edit_setting", self.context.user_data)
             text = self.context.bot.edit_message_text.await_args.kwargs["text"]
             self.assertIn("Баланс и рефералы", text)
-            self.assertIn("после перезапуска", text)
+            self.assertIn("Применить изменения", text)
 
     async def test_env_cancel_returns_to_second_page_of_group(self):
         keys = handlers.ENV_SETTING_GROUPS["clients"][1]
@@ -438,7 +444,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
             await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
-            await self.click(1, self.last_reply_markup.inline_keyboard[-2][0].callback_data)
+            await self.click(1, "envsettings:group:clients:2")
             await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
             await self.click(1, self.cancel_button_data())
             self.assertIn("Клиенты 3x-ui · 2/2", self.context.bot.edit_message_text.await_args.kwargs["text"])
@@ -456,6 +462,45 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             await handlers.button_callback(Update(999, callback_query=query), self.context)
         self.assertNotIn("env_edit_setting", self.context.user_data)
         self.context.bot.edit_message_text.assert_not_awaited()
+
+    async def test_env_apply_validates_saved_settings_and_requests_graceful_restart(self):
+        with (
+            patch.object(handlers, "is_super_admin", side_effect=lambda user_id: user_id == 1),
+            patch.object(handlers, "env_settings_values", return_value={"XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE": "old"}),
+            patch.object(handlers, "save_env_value"),
+            patch.object(handlers, "env_for_restart", return_value={"KEEP": "1"}) as restart_env,
+            patch.object(handlers, "check_restart_config", new_callable=AsyncMock, return_value=True) as validate,
+        ):
+            await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
+            await self.click(1, "envsettings:group:subscriptions:1")
+            await self.click(1, "envsettings:edit:XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE")
+            await self.press(1, "{base}/new-json/{subId}")
+            self.context.application.stop_running.assert_not_called()
+            self.assertIn("envsettings:apply", [
+                button.callback_data for row in self.last_reply_markup.inline_keyboard for button in row
+            ])
+            await self.click(1, "envsettings:apply")
+
+        restart_env.assert_called_once_with({"XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE"})
+        validate.assert_awaited_once_with({"KEEP": "1"}, check_token=False)
+        self.assertIn("Перезапускаю бота", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.assertEqual(self.context.application.bot_data["restart_environment"], {"KEEP": "1"})
+        self.context.application.stop_running.assert_called_once_with()
+
+    async def test_env_apply_failed_check_keeps_bot_running(self):
+        self.context.application.bot_data["edited_env_keys"] = {"BOT_TOKEN"}
+        with (
+            patch.object(handlers, "is_super_admin", side_effect=lambda user_id: user_id == 1),
+            patch.object(handlers, "env_settings_values", return_value={"BOT_TOKEN": "123:test"}),
+            patch.object(handlers, "env_for_restart", return_value={}),
+            patch.object(handlers, "check_restart_config", new_callable=AsyncMock, return_value=False) as validate,
+        ):
+            await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
+            await self.click(1, "envsettings:apply")
+        validate.assert_awaited_once_with({}, check_token=True)
+        self.assertIn("не прошли проверку", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.assertNotIn("restart_environment", self.context.application.bot_data)
+        self.context.application.stop_running.assert_not_called()
 
     async def test_subscription_card_shows_raw_and_json_for_existing_client(self):
         with ExitStack() as stack:

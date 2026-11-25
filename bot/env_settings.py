@@ -1,8 +1,10 @@
+import asyncio
 import math
 import os
 import re
 import shutil
 import stat
+import sys
 from collections.abc import Iterable
 from hashlib import blake2s
 from pathlib import Path
@@ -12,7 +14,7 @@ from urllib.parse import urlsplit
 from dotenv import dotenv_values, set_key
 from dotenv.parser import parse_stream
 
-from .config import ENV_FILE
+from .config import ENV_FILE, INHERITED_ENVIRONMENT
 
 
 BOOLEAN_ENV_KEYS = {
@@ -245,3 +247,46 @@ def save_env_value(key: str, value: str) -> None:
         os.replace(temporary, ENV_FILE)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def env_for_restart(edited_keys: Iterable[str]) -> dict[str, str]:
+    environment = INHERITED_ENVIRONMENT.copy()
+    # Re-read edited bot settings even if systemd supplied older values at startup.
+    for key in set(edited_keys).intersection(EDITABLE_ENV_KEYS):
+        environment.pop(key, None)
+    return environment
+
+
+async def check_restart_config(environment: dict[str, str], *, check_token: bool) -> bool:
+    script = """
+import asyncio
+import sys
+from bot.config import BOT_TOKEN
+from telegram import Bot
+
+bot = Bot(BOT_TOKEN)
+
+async def check_bot():
+    async with bot:
+        pass
+
+if sys.argv[1] == "check-token":
+    asyncio.run(check_bot())
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", script, "check-token" if check_token else "config-only",
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        return await asyncio.wait_for(process.wait(), timeout=15) == 0
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.wait()
+        raise
