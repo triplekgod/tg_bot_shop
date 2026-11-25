@@ -1225,11 +1225,8 @@ def client_main_keyboard() -> ReplyKeyboardMarkup:
 
 def balance_keyboard() -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton("💳 Пополнить P2P", callback_data="balance:p2p")]]
-    if CRYPTO_PAYMENTS_CONFIG:
-        buttons.append([InlineKeyboardButton("₿ Пополнить криптовалютой", callback_data="cryptopay:menu")])
     if CRYPTO_TOPUP_ENABLED:
-        title = "Криптопополнение вручную" if CRYPTO_PAYMENTS_CONFIG else "₿ Пополнить криптовалютой"
-        buttons.append([InlineKeyboardButton(title, callback_data="balance:crypto")])
+        buttons.append([InlineKeyboardButton("₿ Пополнить криптовалютой", callback_data="balance:crypto")])
     buttons.append([InlineKeyboardButton("⭐ Купить подписку за Stars", callback_data="starsbuy:start")])
     return InlineKeyboardMarkup(buttons)
 

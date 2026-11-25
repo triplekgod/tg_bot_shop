@@ -143,7 +143,6 @@ BALANCE_MAX_TOPUP_RUB = max(BALANCE_MIN_TOPUP_RUB, int(os.getenv("BALANCE_MAX_TO
 # Криптопополнение оставлено в коде, но по умолчанию скрыто из клиентского меню.
 # Укажите true, чтобы вернуть кнопку без изменения кода.
 CRYPTO_TOPUP_ENABLED = os.getenv("CRYPTO_TOPUP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "да"}
-CRYPTO_PAYMENTS_CONFIG = os.getenv("CRYPTO_PAYMENTS_CONFIG", "").strip()
 REFERRAL_PERCENT = max(0, min(100, int(os.getenv("REFERRAL_PERCENT", "25") or 25)))
 
 

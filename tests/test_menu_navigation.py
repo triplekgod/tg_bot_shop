@@ -540,32 +540,3 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         message = self.context.bot.send_message.await_args.kwargs["text"]
         self.assertIn("https://sub.example.test/sub/test-id", message)
         self.assertIn("https://sub.example.test/json/test-id", message)
-
-    async def test_crypto_balance_menu_lists_five_methods_and_creates_invoice(self):
-        config = SimpleNamespace(rates=dict.fromkeys(handlers.ASSETS))
-        invoice = {
-            "id": "sample", "asset": "usdt-ton", "rubles": 300, "expected": "3000000",
-            "expires_at": int(datetime.now(timezone.utc).timestamp()) + 1800,
-            "credited_at": None, "address": "wallet-address", "memo": "topup-sample",
-        }
-        with (
-            patch.object(handlers, "CRYPTO_PAYMENTS_CONFIG", "test.json"),
-            patch.object(tickets, "CRYPTO_PAYMENTS_CONFIG", "test.json"),
-            patch.object(handlers, "client_crypto_config", return_value=config),
-            patch.object(handlers, "create_invoice", return_value=invoice) as create,
-            patch.object(handlers, "invoice_received", return_value=0),
-        ):
-            await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
-            await self.click(2, "cryptopay:menu")
-            methods = [
-                button.callback_data for row in self.last_reply_markup.inline_keyboard for button in row
-                if button.callback_data.startswith("cryptopay:asset:")
-            ]
-            self.assertEqual(methods, [f"cryptopay:asset:{code}" for code in handlers.ASSETS])
-            await self.click(2, "cryptopay:asset:usdt-ton")
-            await self.press(2, "300")
-        create.assert_called_once_with(config, 2, "usdt-ton", 300)
-        invoice_text = self.context.bot.edit_message_text.await_args.kwargs["text"]
-        self.assertIn("3</code> USDT", invoice_text)
-        self.assertIn("topup-sample", invoice_text)
-        self.assertNotIn("crypto_topup_asset", self.context.user_data)
