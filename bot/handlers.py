@@ -1,11 +1,14 @@
 from collections.abc import Awaitable
 from weakref import WeakValueDictionary
 
+from telegram import LinkPreviewOptions
 from telegram.error import BadRequest
 from telegram.ext import BaseUpdateProcessor
 
+from .backup import run_daily_backups
 from .config import *
 from .database import *
+from .env_settings import env_display_value, env_key_reference, env_settings_values, env_value_can_be_empty, save_env_value
 from .xui import *
 from .tickets import *
 
@@ -157,7 +160,7 @@ class MenuScreen:
 
 
 def discard_draft_input(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for key in ("client_waiting_ticket_text", "admin_broadcast_mode", "balance_topup_method"):
+    for key in ("client_waiting_ticket_text", "admin_broadcast_mode", "balance_topup_method", "env_edit_setting"):
         context.user_data.pop(key, None)
 
 
@@ -167,6 +170,85 @@ async def discard_input_on_command(update: Update, context: ContextTypes.DEFAULT
 
 def cancel_input_keyboard(update_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[cancel_input_button(update_id)]])
+
+
+ENV_SETTINGS_PAGE_SIZE = 10
+
+
+def can_edit_env(update: Update) -> bool:
+    user, chat = update.effective_user, update.effective_chat
+    return bool(user and chat and chat.type == "private" and is_super_admin(user.id))
+
+
+async def show_env_settings(
+    screen: MenuScreen, page: int = 1, notice: str = "", selected_key: Optional[str] = None,
+) -> None:
+    try:
+        values = env_settings_values()
+    except (OSError, UnicodeError):
+        await screen.reply_text("Не удалось прочитать .env.")
+        return
+    keys = list(values)
+    if selected_key in values:
+        page = keys.index(selected_key) // ENV_SETTINGS_PAGE_SIZE + 1
+    pages = (len(keys) + ENV_SETTINGS_PAGE_SIZE - 1) // ENV_SETTINGS_PAGE_SIZE
+    page = max(1, min(page, pages))
+    offset = (page - 1) * ENV_SETTINGS_PAGE_SIZE
+    rows, lines = [], []
+    for key in keys[offset:offset + ENV_SETTINGS_PAGE_SIZE]:
+        label = env_display_value(key, 56)
+        value = values[key]
+        if value:
+            value = value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+        lines.append(f"{label} = {env_display_value(value, 130)}")
+        rows.append([InlineKeyboardButton(f"Изменить {label}", callback_data=f"envsettings:edit:{env_key_reference(key)}")])
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton("⬅️", callback_data=f"envsettings:list:{page - 1}"))
+    if page < pages:
+        navigation.append(InlineKeyboardButton("➡️", callback_data=f"envsettings:list:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    current_values = "\n".join(lines)
+    await screen.reply_text(
+        f"{notice}⚙️ Настройки .env · {page}/{pages}\n\n{current_values}\n\n"
+        "Изменения применятся после перезапуска бота.",
+        reply_markup=InlineKeyboardMarkup(rows),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+
+
+async def show_env_input(screen: MenuScreen, key: str, error: str = "") -> None:
+    try:
+        current = env_display_value(env_settings_values().get(key))
+    except (OSError, UnicodeError):
+        current = "Не удалось прочитать .env"
+    rows = []
+    if env_value_can_be_empty(key):
+        rows.append([InlineKeyboardButton("Оставить пустым", callback_data=f"envsettings:empty:{screen.update.update_id}")])
+    rows.append([cancel_input_button(screen.update.update_id)])
+    prompt = "Отправьте новое значение одним текстовым сообщением."
+    if key == "DB_PATH":
+        prompt += "\nПри смене пути существующая база не переносится."
+    await screen.reply_text(
+        f"{error}{env_display_value(key, 300)}\nТекущее значение в .env: {current}\n\n{prompt}",
+        reply_markup=InlineKeyboardMarkup(rows),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    screen.context.user_data["env_edit_setting"] = key
+
+
+async def apply_env_setting(screen: MenuScreen, key: str, value: str) -> None:
+    try:
+        save_env_value(key, value)
+    except (OSError, UnicodeError):
+        await show_env_input(screen, key, error="Не удалось записать .env. Проверьте права на файл и его папку.\n\n")
+        return
+    except ValueError as exc:
+        await show_env_input(screen, key, error=f"{exc}\n\n")
+        return
+    screen.context.user_data.pop("env_edit_setting", None)
+    await show_env_settings(screen, selected_key=key, notice=f"✅ {env_display_value(key, 56)} сохранено.\n\n")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2024,7 +2106,7 @@ async def handle_admin_menu_button(
     }
     other_buttons = {
         ADMIN_BUTTON_BACK, ADMIN_BUTTON_ADMIN_SETTINGS, ADMIN_BUTTON_TRIAL_SETTINGS,
-        ADMIN_BUTTON_BROADCAST_ALL, ADMIN_BUTTON_BROADCAST_ACTIVE, ADMIN_BUTTON_RENEW,
+        ADMIN_BUTTON_BROADCAST_ALL, ADMIN_BUTTON_BROADCAST_ACTIVE, ADMIN_BUTTON_RENEW, ADMIN_BUTTON_ENV_SETTINGS,
     }
     if text not in sections and text not in commands and text not in other_buttons:
         return False
@@ -2045,6 +2127,13 @@ async def handle_admin_menu_button(
 
     if text == ADMIN_BUTTON_BACK:
         await screen.reply_text("Главное меню администратора.", reply_markup=admin_main_keyboard())
+        return True
+
+    if text == ADMIN_BUTTON_ENV_SETTINGS:
+        if can_edit_env(update):
+            await show_env_settings(screen)
+        else:
+            await screen.reply_text("Редактор .env доступен главному администратору в личном чате с ботом.")
         return True
 
     if text == ADMIN_BUTTON_ADMIN_SETTINGS:
@@ -2094,6 +2183,18 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if await handle_admin_menu_button(update, context):
+        return
+
+    env_key = context.user_data.get("env_edit_setting")
+    if env_key:
+        if not can_edit_env(update):
+            return
+        screen = MenuScreen(update, context)
+        screen.remove_menu_press()
+        if message.text:
+            await apply_env_setting(screen, env_key, message.text.strip())
+        else:
+            await show_env_input(screen, env_key, error="Отправьте значение текстом.\n\n")
         return
 
     if await handle_admin_subscription_message_recording(update, context):
@@ -3567,6 +3668,7 @@ def clear_pending_input(context: ContextTypes.DEFAULT_TYPE) -> None:
         "client_waiting_stars_months",
         "client_waiting_subscribe_months",
         "client_waiting_ticket_text",
+        "env_edit_setting",
         "reply_to_ticket_id",
     ):
         context.user_data.pop(key, None)
@@ -3657,11 +3759,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await handle_admin_menu_button(update, context, menu_label)
         return
 
+    if action == "envsettings":
+        if not can_edit_env(update):
+            return
+        operation, _, argument = value.partition(":")
+        if operation == "list" and argument.isdecimal():
+            clear_pending_input(context)
+            await show_env_settings(screen, int(argument))
+        elif operation == "edit":
+            try:
+                keys = env_settings_values()
+            except (OSError, UnicodeError):
+                await screen.reply_text("Не удалось прочитать .env.")
+                return
+            key = next((key for key in keys if env_key_reference(key) == argument), None)
+            if key:
+                clear_pending_input(context)
+                await show_env_input(screen, key)
+        elif (
+            operation == "empty"
+            and argument == str(context.chat_data.get("menu_screen_update"))
+            and screen.message.message_id in screen.message_ids
+        ):
+            key = context.user_data.get("env_edit_setting")
+            if key and env_value_can_be_empty(key):
+                await apply_env_setting(screen, key, "")
+        return
+
     if action == "input":
         screen_update_id = context.chat_data.get("menu_screen_update")
         if value != f"cancel:{screen_update_id}" or screen.message.message_id not in screen.message_ids:
             return
-        if is_admin(user.id) and context.user_data.get("admin_broadcast_mode"):
+        env_key = context.user_data.get("env_edit_setting")
+        if env_key and can_edit_env(update):
+            clear_pending_input(context)
+            await show_env_settings(screen, selected_key=env_key)
+        elif is_admin(user.id) and context.user_data.get("admin_broadcast_mode"):
             clear_pending_input(context)
             await screen.reply_text("Рассылка отменена.", reply_markup=admin_section_keyboard("service", user.id))
         elif context.user_data.get("client_waiting_ticket_text"):
@@ -4922,11 +5055,20 @@ async def post_init(application: Application) -> None:
             await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramError as exc:
             logger.warning("Не удалось установить команды для админа %s: %s", admin_id, exc)
+    application.bot_data["daily_backup_task"] = asyncio.create_task(run_daily_backups(application.bot))
+
+
+async def stop_daily_backups(application: Application) -> None:
+    task = application.bot_data.pop("daily_backup_task", None)
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Не позволяет ошибкам обработчика исчезать в стандартном сообщении PTB."""
-    logger.exception("Необработанная ошибка при обработке update %r", update, exc_info=context.error)
+    update_id = update.update_id if isinstance(update, Update) else None
+    logger.exception("Необработанная ошибка при обработке update %s", update_id, exc_info=context.error)
 
 def build_app() -> Application:
     if not BOT_TOKEN:
@@ -4934,7 +5076,15 @@ def build_app() -> Application:
     if not get_admin_ids():
         raise RuntimeError("Не указан ни один администратор. Заполните ADMIN_IDS в .env")
 
-    application = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(ChatUpdateProcessor()).post_init(post_init).build()
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(ChatUpdateProcessor())
+        .post_init(post_init)
+        .post_stop(stop_daily_backups)
+        .post_shutdown(stop_daily_backups)
+        .build()
+    )
 
     application.add_handler(MessageHandler(filters.COMMAND, discard_input_on_command), group=-1)
     application.add_handler(CommandHandler("start", start))

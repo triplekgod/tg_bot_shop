@@ -1182,6 +1182,7 @@ ADMIN_BUTTON_XUI_GROUP = "🖥 3x-ui"
 ADMIN_BUTTON_CLIENTS_GROUP = "👥 Клиенты"
 ADMIN_BUTTON_SERVICE_GROUP = "⚙️ Сервис"
 ADMIN_BUTTON_ADMIN_SETTINGS = "👑 Админы и уведомления"
+ADMIN_BUTTON_ENV_SETTINGS = "⚙️ Настройки .env"
 ADMIN_BUTTON_TRIAL_SETTINGS = "🎁 Пробные подписки"
 ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
@@ -1280,6 +1281,7 @@ def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> Reply
         buttons.append([ADMIN_BUTTON_TRIAL_SETTINGS])
     if section == "service" and is_super_admin(user_id):
         buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
+        buttons.append([ADMIN_BUTTON_ENV_SETTINGS])
     return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True, is_persistent=True)
 
 

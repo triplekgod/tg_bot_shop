@@ -10,11 +10,12 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
 
 import httpx
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from telegram import BotCommandScopeChat, BotCommandScopeDefault, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -29,7 +30,8 @@ from telegram.ext import (
     filters,
 )
 
-load_dotenv()
+ENV_FILE = Path(find_dotenv() or (Path(__file__).resolve().parents[1] / ".env")).resolve()
+load_dotenv(ENV_FILE)
 
 
 def parse_int_csv(value: str) -> list[int]:

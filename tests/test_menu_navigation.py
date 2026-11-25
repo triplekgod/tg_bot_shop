@@ -386,3 +386,42 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("admin_broadcast_mode", self.context.user_data)
         self.reply_text.assert_awaited_once()
         self.context.bot.edit_message_text.assert_not_awaited()
+
+    async def test_super_admin_can_edit_env_from_service_menu(self):
+        with (
+            patch.object(tickets, "is_super_admin", return_value=True),
+            patch.object(handlers, "is_super_admin", side_effect=lambda user_id: user_id == 1),
+            patch.object(handlers, "env_settings_values", return_value={
+                "BALANCE_PRICE_PER_MONTH": "250", "XUI_API_TOKEN": "test-token-value",
+            }),
+            patch.object(handlers, "save_env_value") as save,
+        ):
+            await self.press(1, handlers.ADMIN_BUTTON_SERVICE_GROUP)
+            labels = [button.text for row in self.last_reply_markup.keyboard for button in row]
+            self.assertIn(handlers.ADMIN_BUTTON_ENV_SETTINGS, labels)
+            await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
+            self.assertIn("BALANCE_PRICE_PER_MONTH = 250", self.reply_text.await_args.args[0])
+            self.assertIn("XUI_API_TOKEN = test-token-value", self.reply_text.await_args.args[0])
+            buttons = [row[0] for row in self.last_reply_markup.inline_keyboard]
+            self.assertEqual([button.text for button in buttons], ["Изменить BALANCE_PRICE_PER_MONTH", "Изменить XUI_API_TOKEN"])
+            await self.click(1, buttons[1].callback_data)
+            self.assertIn("test-token-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            await self.click(1, "envsettings:edit:BALANCE_PRICE_PER_MONTH")
+            await self.press(1, "320")
+            save.assert_called_once_with("BALANCE_PRICE_PER_MONTH", "320")
+            self.assertNotIn("env_edit_setting", self.context.user_data)
+            self.assertIn("после перезапуска", self.context.bot.edit_message_text.await_args.kwargs["text"])
+
+    async def test_env_controls_reject_other_admins_and_group_chats(self):
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        with (
+            patch.object(handlers, "is_admin", return_value=True),
+            patch.object(handlers, "is_super_admin", side_effect=lambda user_id: user_id == 1),
+        ):
+            await self.click(2, "envsettings:edit:BOT_TOKEN")
+            admin = User(1, "Test", is_bot=False)
+            group_message = Message(10, datetime.now(timezone.utc), Chat(-100, "group"), from_user=admin)
+            query = CallbackQuery("test", admin, "chat", message=group_message, data="envsettings:edit:BOT_TOKEN")
+            await handlers.button_callback(Update(999, callback_query=query), self.context)
+        self.assertNotIn("env_edit_setting", self.context.user_data)
+        self.context.bot.edit_message_text.assert_not_awaited()
