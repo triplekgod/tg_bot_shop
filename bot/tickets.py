@@ -1185,6 +1185,7 @@ def client_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[CLIENT_BUTTON_SUBSCRIPTION], [CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS], [CLIENT_BUTTON_CONNECTION_GUIDE, CLIENT_BUTTON_TICKET]],
         resize_keyboard=True,
+        is_persistent=True,
         input_field_placeholder="Выберите действие",
     )
 

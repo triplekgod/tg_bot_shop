@@ -1,3 +1,5 @@
+from telegram.error import BadRequest
+
 from .config import *
 from .database import *
 from .xui import *
@@ -16,19 +18,26 @@ class MenuScreen:
     def message_ids(self) -> list[int]:
         return self.context.chat_data.get("menu_screen_ids", [])
 
-    async def track(self, message_id: int) -> None:
+    async def track(self, message_id: int, replaced_keyboard_id: Optional[int] = None) -> None:
         chat_data = self.context.chat_data
-        if chat_data.get("menu_screen_update") == self.update.update_id:
-            if message_id not in self.message_ids:
-                self.message_ids.append(message_id)
-            return
-
         previous_ids = self.message_ids
-        chat_data["menu_screen_ids"] = [message_id]
-        chat_data["menu_screen_update"] = self.update.update_id
-        for previous_id in previous_ids:
-            if previous_id == message_id:
-                continue
+        if chat_data.get("menu_screen_update") == self.update.update_id:
+            if message_id not in previous_ids:
+                previous_ids.append(message_id)
+            obsolete_ids = set()
+        else:
+            chat_data["menu_screen_ids"] = [message_id]
+            chat_data["menu_screen_update"] = self.update.update_id
+            obsolete_ids = set(previous_ids)
+
+        if replaced_keyboard_id is not None:
+            obsolete_ids.add(replaced_keyboard_id)
+            if replaced_keyboard_id in self.message_ids:
+                self.message_ids.remove(replaced_keyboard_id)
+        # Inline menus need the previous message that carries the bottom keyboard.
+        obsolete_ids.discard(chat_data.get("menu_keyboard_id"))
+        obsolete_ids.discard(message_id)
+        for previous_id in obsolete_ids:
             try:
                 await self.context.bot.delete_message(self.message.chat_id, previous_id)
             except TelegramError:
@@ -40,9 +49,36 @@ class MenuScreen:
                 except TelegramError:
                     pass
 
-    async def reply_text(self, *args, **kwargs) -> None:
-        sent = await self.message.reply_text(*args, **kwargs, do_quote=False)
-        await self.track(sent.message_id)
+    async def reply_text(self, text: str, **kwargs) -> None:
+        chat_data = self.context.chat_data
+        markup = kwargs.get("reply_markup")
+        inline_id = chat_data.get("menu_editable_id")
+        if (
+            (markup is None or isinstance(markup, InlineKeyboardMarkup))
+            and inline_id is not None
+            and self.message_ids == [inline_id]
+            and chat_data.get("menu_screen_update") != self.update.update_id
+        ):
+            try:
+                await self.context.bot.edit_message_text(
+                    chat_id=self.message.chat_id, message_id=inline_id, text=text, **kwargs,
+                )
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    await self.track(inline_id)
+                    return
+                # The old screen may have been deleted. Send a new one below.
+            else:
+                await self.track(inline_id)
+                return
+
+        sent = await self.message.reply_text(text, **kwargs, do_quote=False)
+        replaced_keyboard_id = None
+        if isinstance(markup, ReplyKeyboardMarkup):
+            replaced_keyboard_id = chat_data.get("menu_keyboard_id")
+            chat_data["menu_keyboard_id"] = sent.message_id
+        chat_data["menu_editable_id"] = sent.message_id if isinstance(markup, InlineKeyboardMarkup) else None
+        await self.track(sent.message_id, replaced_keyboard_id)
 
     async def edit_text(self, *args, **kwargs) -> None:
         await self.update.callback_query.edit_message_text(*args, **kwargs)
@@ -66,8 +102,10 @@ async def discard_input_on_command(update: Update, context: ContextTypes.DEFAULT
     discard_ticket_and_broadcast_input(context)
 
 
-def cancel_input_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="input:cancel")]])
+def cancel_input_keyboard(update_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Отмена", callback_data=f"input:cancel:{update_id}"),
+    ]])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1910,7 +1948,7 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         audience = "только клиентам с действующей подпиской" if mode == "active" else "всем незаблокированным пользователям"
         await screen.reply_text(
             f"Отправьте текст рассылки одним сообщением. Он будет отправлен {audience}.",
-            reply_markup=cancel_input_keyboard(),
+            reply_markup=cancel_input_keyboard(update.update_id),
         )
         context.user_data["admin_broadcast_mode"] = mode
         return True
@@ -1964,13 +2002,13 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         screen = MenuScreen(update, context)
         text = (message.text or "").strip()
         if not text:
-            await screen.reply_text("Для рассылки отправьте текстовым сообщением.", reply_markup=cancel_input_keyboard())
+            await screen.reply_text("Для рассылки отправьте текстовым сообщением.", reply_markup=cancel_input_keyboard(update.update_id))
             return
         if broadcast_mode == "active":
             try:
                 recipient_ids = await active_client_broadcast_recipient_ids()
             except XuiApiError as exc:
-                await screen.reply_text(f"Не удалось проверить активные подписки в 3x-ui: {exc}. Повторите отправку сообщения.", reply_markup=cancel_input_keyboard())
+                await screen.reply_text(f"Не удалось проверить активные подписки в 3x-ui: {exc}. Повторите отправку сообщения.", reply_markup=cancel_input_keyboard(update.update_id))
                 return
             audience = "активным клиентам"
         else:
@@ -2130,6 +2168,13 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    last_message_id = context.chat_data.get("last_routed_message_id")
+    if update.message.message_id == last_message_id:
+        return
+    context.chat_data["last_routed_message_id"] = update.message.message_id
+
     user_id = update.effective_user.id if update.effective_user else None
     if is_admin(user_id):
         await handle_admin_message(update, context)
@@ -3488,8 +3533,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "noop":
         return
 
-    if action == "input" and value == "cancel":
-        if screen.message.message_id not in screen.message_ids:
+    if action == "input":
+        screen_update_id = context.chat_data.get("menu_screen_update")
+        if value != f"cancel:{screen_update_id}" or screen.message.message_id not in screen.message_ids:
             return
         if is_admin(user.id) and context.user_data.get("admin_broadcast_mode"):
             clear_pending_input(context)
@@ -3658,7 +3704,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         clear_pending_input(context)
         await screen.reply_text(
             "Опишите проблему одним сообщением — я передам его в поддержку.",
-            reply_markup=cancel_input_keyboard(),
+            reply_markup=cancel_input_keyboard(update.update_id),
         )
         context.user_data["client_waiting_ticket_text"] = True
         return
