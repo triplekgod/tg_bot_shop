@@ -8,7 +8,14 @@ from telegram.ext import BaseUpdateProcessor
 from .backup import run_daily_backups
 from .config import *
 from .database import *
-from .env_settings import env_display_value, env_key_reference, env_settings_values, env_value_can_be_empty, save_env_value
+from .env_settings import (
+    env_display_value,
+    env_key_reference,
+    env_setting_descriptions,
+    env_settings_values,
+    env_value_can_be_empty,
+    save_env_value,
+)
 from .xui import *
 from .tickets import *
 
@@ -172,7 +179,7 @@ def cancel_input_keyboard(update_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[cancel_input_button(update_id)]])
 
 
-ENV_SETTINGS_PAGE_SIZE = 10
+ENV_SETTINGS_PAGE_SIZE = 7
 
 
 def can_edit_env(update: Update) -> bool:
@@ -194,13 +201,20 @@ async def show_env_settings(
     pages = (len(keys) + ENV_SETTINGS_PAGE_SIZE - 1) // ENV_SETTINGS_PAGE_SIZE
     page = max(1, min(page, pages))
     offset = (page - 1) * ENV_SETTINGS_PAGE_SIZE
+    page_keys = keys[offset:offset + ENV_SETTINGS_PAGE_SIZE]
+    try:
+        descriptions = env_setting_descriptions(page_keys)
+    except (OSError, UnicodeError):
+        await screen.reply_text("Не удалось прочитать описания из .env.")
+        return
     rows, lines = [], []
-    for key in keys[offset:offset + ENV_SETTINGS_PAGE_SIZE]:
+    for key in page_keys:
         label = env_display_value(key, 56)
         value = values[key]
         if value:
             value = value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
-        lines.append(f"{label} = {env_display_value(value, 130)}")
+        description = env_display_value(descriptions[key], 110)
+        lines.append(f"{label} = {env_display_value(value, 130)}\n{description}")
         rows.append([InlineKeyboardButton(f"Изменить {label}", callback_data=f"envsettings:edit:{env_key_reference(key)}")])
     navigation = []
     if page > 1:
@@ -209,7 +223,7 @@ async def show_env_settings(
         navigation.append(InlineKeyboardButton("➡️", callback_data=f"envsettings:list:{page + 1}"))
     if navigation:
         rows.append(navigation)
-    current_values = "\n".join(lines)
+    current_values = "\n\n".join(lines)
     await screen.reply_text(
         f"{notice}⚙️ Настройки .env · {page}/{pages}\n\n{current_values}\n\n"
         "Изменения применятся после перезапуска бота.",
@@ -221,17 +235,17 @@ async def show_env_settings(
 async def show_env_input(screen: MenuScreen, key: str, error: str = "") -> None:
     try:
         current = env_display_value(env_settings_values().get(key))
+        description = env_display_value(env_setting_descriptions([key])[key], 300)
     except (OSError, UnicodeError):
         current = "Не удалось прочитать .env"
+        description = "Описание недоступно."
     rows = []
     if env_value_can_be_empty(key):
         rows.append([InlineKeyboardButton("Оставить пустым", callback_data=f"envsettings:empty:{screen.update.update_id}")])
     rows.append([cancel_input_button(screen.update.update_id)])
-    prompt = "Отправьте новое значение одним текстовым сообщением."
-    if key == "DB_PATH":
-        prompt += "\nПри смене пути существующая база не переносится."
     await screen.reply_text(
-        f"{error}{env_display_value(key, 300)}\nТекущее значение в .env: {current}\n\n{prompt}",
+        f"{error}{env_display_value(key, 300)}\n{description}\n\n"
+        f"Текущее значение в .env: {current}\n\nОтправьте новое значение одним текстовым сообщением.",
         reply_markup=InlineKeyboardMarkup(rows),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )

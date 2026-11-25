@@ -72,6 +72,26 @@ class BackupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvSettingsTests(unittest.TestCase):
+    def test_all_supported_settings_have_descriptions(self):
+        self.assertEqual(set(env_settings.EDITABLE_ENV_KEYS), env_settings.ENV_DESCRIPTIONS.keys())
+        self.assertTrue(all(env_settings.ENV_DESCRIPTIONS.values()))
+
+    def test_custom_descriptions_use_adjacent_comments_above_setting(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            path.write_text(
+                "MULTILINE='value\n# Часть значения, а не комментарий'\n"
+                "# Описание дополнительной настройки.\n# Продолжение.\nCUSTOM_KEY=yes\n"
+                "# Заголовок раздела\n\nUNCOMMENTED=yes\n"
+                "# Локальный комментарий\nXUI_TIMEOUT=20\n",
+                encoding="utf-8",
+            )
+            with patch.object(env_settings, "ENV_FILE", path):
+                descriptions = env_settings.env_setting_descriptions(["CUSTOM_KEY", "UNCOMMENTED", "XUI_TIMEOUT"])
+        self.assertEqual(descriptions["CUSTOM_KEY"], "Описание дополнительной настройки. Продолжение.")
+        self.assertIn("Назначение не указано", descriptions["UNCOMMENTED"])
+        self.assertEqual(descriptions["XUI_TIMEOUT"], env_settings.ENV_DESCRIPTIONS["XUI_TIMEOUT"])
+
     def test_saving_changes_only_selected_setting_and_retains_credential_value(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

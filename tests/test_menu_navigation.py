@@ -401,11 +401,13 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(handlers.ADMIN_BUTTON_ENV_SETTINGS, labels)
             await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
             self.assertIn("BALANCE_PRICE_PER_MONTH = 250", self.reply_text.await_args.args[0])
+            self.assertIn("Цена месяца подписки в рублях при оплате с баланса", self.reply_text.await_args.args[0])
             self.assertIn("XUI_API_TOKEN = test-token-value", self.reply_text.await_args.args[0])
             buttons = [row[0] for row in self.last_reply_markup.inline_keyboard]
             self.assertEqual([button.text for button in buttons], ["Изменить BALANCE_PRICE_PER_MONTH", "Изменить XUI_API_TOKEN"])
             await self.click(1, buttons[1].callback_data)
             self.assertIn("test-token-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            self.assertIn("API-токен 3x-ui", self.context.bot.edit_message_text.await_args.kwargs["text"])
             await self.click(1, "envsettings:edit:BALANCE_PRICE_PER_MONTH")
             await self.press(1, "320")
             save.assert_called_once_with("BALANCE_PRICE_PER_MONTH", "320")
