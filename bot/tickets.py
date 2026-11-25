@@ -1001,10 +1001,15 @@ def payment_method_label(method: Optional[str]) -> str:
     return "⭐️ Tg Stars" if str(method or "manual").lower() == "stars" else "P2P(Перевод)"
 
 
-def renewal_payment_choice_keyboard(months: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("💰 С баланса", callback_data=f"renewpay:balance:{months}")]]
+def cancel_input_button(update_id: int) -> InlineKeyboardButton:
+    return InlineKeyboardButton("❌ Отмена", callback_data=f"input:cancel:{update_id}")
+
+
+def renewal_payment_choice_keyboard(update_id: int) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("💰 С баланса", callback_data=f"renewpay:balance:{update_id}")]]
     if STARS_PAYMENTS_ENABLED and STARS_PRICE_PER_MONTH > 0:
-        rows.append([InlineKeyboardButton("⭐️ Tg Stars", callback_data=f"renewpay:stars:{months}")])
+        rows.append([InlineKeyboardButton("⭐️ Tg Stars", callback_data=f"renewpay:stars:{update_id}")])
+    rows.append([cancel_input_button(update_id)])
     return InlineKeyboardMarkup(rows)
 
 

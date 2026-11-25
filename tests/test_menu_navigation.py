@@ -27,6 +27,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.broadcast.return_value = (1, 0)
         stack.enter_context(patch.object(Message, "delete", new_callable=AsyncMock))
         stack.enter_context(patch.object(CallbackQuery, "answer", new_callable=AsyncMock))
+        stack.enter_context(patch.object(CallbackQuery, "edit_message_reply_markup", new_callable=AsyncMock))
         self.next_id = 100
         self.last_reply_markup = None
         self.reply_text = stack.enter_context(patch.object(Message, "reply_text", side_effect=self.send_reply))
@@ -70,9 +71,14 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await handlers.button_callback(Update(self.next_id, callback_query=query), self.context)
 
     def cancel_button_data(self):
-        data = self.last_reply_markup.inline_keyboard[0][0].callback_data
+        data = self.last_reply_markup.inline_keyboard[-1][0].callback_data
         self.assertTrue(data.startswith("input:cancel:"))
         return data
+
+    def mock_subscription(self, stack):
+        stack.enter_context(patch.object(handlers, "resolve_xui_email_for_user", return_value=("vpn-client", "linked")))
+        panel = stack.enter_context(patch.object(handlers, "XuiClient"))
+        panel.return_value.__aenter__.return_value.get_client_summary = AsyncMock(return_value={"expiry_ms": 0})
 
     async def test_admin_menu_discards_broadcast_and_replaces_prompt(self):
         await self.press(1, handlers.ADMIN_BUTTON_BROADCAST_ALL)
@@ -174,3 +180,53 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await handlers.route_message(Update(3, edited_message=edited), self.context)
         self.reply_text.assert_awaited_once()
         self.context.bot.edit_message_text.assert_not_awaited()
+
+    async def test_cancel_renewal_months_returns_to_subscription_card(self):
+        with ExitStack() as stack:
+            self.mock_subscription(stack)
+            await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
+            await self.click(2, "subscription:renew")
+            await self.press(2, "не число")
+            await self.click(2, self.cancel_button_data())
+
+        self.assertNotIn("client_waiting_renew_months", self.context.user_data)
+        self.assertIn("Ваша подписка", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][0].callback_data, "subscription:renew")
+
+    async def test_switching_menu_replaces_renewal_prompt_and_keeps_keyboard(self):
+        await handlers.start(Update(1, message=self.message(2, text="/start")), self.context)
+        keyboard_id = self.context.chat_data["menu_keyboard_id"]
+        with ExitStack() as stack:
+            self.mock_subscription(stack)
+            await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
+            await self.click(2, "subscription:renew")
+
+        prompt_id = self.context.chat_data["menu_screen_ids"][0]
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        self.assertNotIn("client_waiting_renew_months", self.context.user_data)
+        edit = self.context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edit["message_id"], prompt_id)
+        self.assertIn("Ваш баланс", edit["text"])
+        self.assertEqual(self.context.chat_data["menu_keyboard_id"], keyboard_id)
+        self.context.bot.delete_message.assert_not_awaited()
+
+    async def test_cancel_renewal_payment_returns_to_months_and_invalidates_old_payment(self):
+        with ExitStack() as stack:
+            self.mock_subscription(stack)
+            pay = stack.enter_context(patch.object(handlers, "process_client_renewal_payment_choice", new_callable=AsyncMock))
+            await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
+            await self.click(2, "subscription:renew")
+            await self.press(2, "3")
+            old_payment = self.last_reply_markup.inline_keyboard[0][0].callback_data
+
+            await self.click(2, self.cancel_button_data())
+            self.assertIn("На сколько месяцев", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            self.assertNotIn("client_renew_months", self.context.user_data)
+            await self.press(2, "3")
+            new_payment = self.last_reply_markup.inline_keyboard[0][0].callback_data
+            await self.click(2, old_payment)
+            pay.assert_not_awaited()
+            await self.click(2, new_payment)
+
+        pay.assert_awaited_once()
+        self.assertEqual(pay.await_args.args[2:], (3, "balance"))

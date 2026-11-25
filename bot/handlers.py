@@ -103,9 +103,7 @@ async def discard_input_on_command(update: Update, context: ContextTypes.DEFAULT
 
 
 def cancel_input_keyboard(update_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("❌ Отмена", callback_data=f"input:cancel:{update_id}"),
-    ]])
+    return InlineKeyboardMarkup([[cancel_input_button(update_id)]])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1170,6 +1168,51 @@ async def try_auto_create_subscription_after_stars_payment(
     return True
 
 
+async def show_client_subscription(screen: MenuScreen, user_id: int) -> None:
+    xui_email, source = await resolve_xui_email_for_user(user_id)
+    if not xui_email:
+        if source.startswith("error:"):
+            await screen.reply_text(
+                "Не удалось проверить подписку в панели 3x-ui. Повторите позже или обратитесь в поддержку: подробности ошибки есть в журнале сервера.",
+                reply_markup=client_main_keyboard(),
+            )
+            return
+        await screen.reply_text(
+            f"📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.\nЦена: <b>{user_monthly_price(user_id)} ₽/мес.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user_id)),
+        )
+        return
+    try:
+        async with XuiClient() as api:
+            summary = await api.get_client_summary(xui_email)
+    except XuiApiError as exc:
+        await screen.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
+        return
+    if not summary:
+        await screen.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
+        return
+    link = build_subscription_link(summary)
+    expiry = format_xui_datetime(safe_int(summary.get("expiry_ms")))
+    link_line = f"\n\n🔗 Ваша ссылка подписки:\n{link}" if link else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
+    await screen.reply_text(
+        f"📄 Ваша подписка\nEmail: <code>{html.escape(xui_email)}</code>\nДействует до: <b>{html.escape(expiry)}</b>{link_line}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Продлить подписку", callback_data="subscription:renew")]]),
+    )
+
+
+async def ask_client_renewal_months(screen: MenuScreen, user_id: int) -> None:
+    await screen.reply_text(
+        f"На сколько месяцев хотите продлить подписку?\n"
+        f"Цена: <b>{user_monthly_price(user_id)} ₽/мес.</b>\n"
+        f"Введите число от 1 до {XUI_MAX_RENEW_MONTHS}.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_input_keyboard(screen.update.update_id),
+    )
+    screen.context.user_data["client_waiting_renew_months"] = True
+
+
 async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     screen = MenuScreen(update, context)
     user = update.effective_user
@@ -1240,37 +1283,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
-        xui_email, source = await resolve_xui_email_for_user(user.id)
-        if not xui_email:
-            if source.startswith("error:"):
-                await screen.reply_text(
-                    "Не удалось проверить подписку в панели 3x-ui. Повторите позже или обратитесь в поддержку: подробности ошибки есть в журнале сервера.",
-                    reply_markup=client_main_keyboard(),
-                )
-                return True
-            await screen.reply_text(
-                f"📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.\nЦена: <b>{user_monthly_price(user.id)} ₽/мес.</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user.id)),
-            )
-            return True
-        try:
-            async with XuiClient() as api:
-                summary = await api.get_client_summary(xui_email)
-        except XuiApiError as exc:
-            await screen.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
-            return True
-        if not summary:
-            await screen.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
-            return True
-        link = build_subscription_link(summary)
-        expiry = format_xui_datetime(safe_int(summary.get("expiry_ms")))
-        link_line = f"\n\n🔗 Ваша ссылка подписки:\n{link}" if link else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
-        await screen.reply_text(
-            f"📄 Ваша подписка\nEmail: <code>{html.escape(xui_email)}</code>\nДействует до: <b>{html.escape(expiry)}</b>{link_line}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Продлить подписку", callback_data="subscription:renew")]]),
-        )
+        await show_client_subscription(screen, user.id)
         return True
 
     if context.user_data.get("client_waiting_renew_months"):
@@ -1279,12 +1292,10 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
             await screen.reply_text(
                 f"Укажите количество месяцев числом от 1 до {XUI_MAX_RENEW_MONTHS}.\n"
                 "Например: 1, 3, 6 или 12.",
-                reply_markup=client_main_keyboard(),
+                reply_markup=cancel_input_keyboard(update.update_id),
             )
             return True
 
-        context.user_data.pop("client_waiting_renew_months", None)
-        context.user_data["client_renew_months"] = months
         monthly_price = user_monthly_price(user.id)
         total_price = months * monthly_price
         await screen.reply_text(
@@ -1292,8 +1303,10 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
             f"Цена: <b>{monthly_price} ₽/мес.</b> · Итого: <b>{total_price} ₽</b>.\n\n"
             "Выберите способ оплаты:",
             parse_mode=ParseMode.HTML,
-            reply_markup=renewal_payment_choice_keyboard(months),
+            reply_markup=renewal_payment_choice_keyboard(update.update_id),
         )
+        context.user_data.pop("client_waiting_renew_months", None)
+        context.user_data["client_renew_months"] = months
         return True
 
     if context.user_data.get("balance_topup_method"):
@@ -3543,9 +3556,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif context.user_data.get("client_waiting_ticket_text"):
             clear_pending_input(context)
             await screen.reply_text("Создание обращения отменено.", reply_markup=client_main_keyboard())
+        elif context.user_data.get("client_waiting_renew_months"):
+            clear_pending_input(context)
+            await show_client_subscription(screen, user.id)
+        elif context.user_data.get("client_renew_months"):
+            clear_pending_input(context)
+            await ask_client_renewal_months(screen, user.id)
         return
 
     discard_ticket_and_broadcast_input(context)
+    if action != "renewpay":
+        context.user_data.pop("client_waiting_renew_months", None)
+        context.user_data.pop("client_renew_months", None)
 
     if action == "balance":
         if value not in {"p2p", "crypto"}:
@@ -3678,14 +3700,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "subscription":
         if value == "renew":
-            context.user_data["client_waiting_renew_months"] = True
-            await screen.reply_text(
-                f"На сколько месяцев хотите продлить подписку?\n"
-                f"Цена: <b>{user_monthly_price(user.id)} ₽/мес.</b>\n"
-                f"Введите число от 1 до {XUI_MAX_RENEW_MONTHS}.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=client_main_keyboard(),
-            )
+            clear_pending_input(context)
+            await ask_client_renewal_months(screen, user.id)
         elif value == "buy":
             context.user_data["client_waiting_subscribe_months"] = True
             await screen.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
@@ -3725,16 +3741,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if action == "renewpay":
-        # Формат callback: renewpay:<manual|stars>:<months>
-        parts = data.split(":")
-        if len(parts) != 3:
-            await screen.reply_text("Некорректный выбор способа оплаты.", reply_markup=client_main_keyboard())
-            return
-        method = parts[1]
-        try:
-            months = int(parts[2])
-        except ValueError:
-            await screen.reply_text("Некорректный срок продления.", reply_markup=client_main_keyboard())
+        method, _, payment_update_id = value.partition(":")
+        months = context.user_data.get("client_renew_months")
+        if (
+            months is None
+            or payment_update_id != str(context.chat_data.get("menu_screen_update"))
+            or screen.message.message_id not in screen.message_ids
+        ):
             return
         if method not in {"balance", "stars"}:
             await screen.reply_text("Некорректный способ оплаты.", reply_markup=client_main_keyboard())
