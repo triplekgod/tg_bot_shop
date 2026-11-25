@@ -3,11 +3,80 @@ from .database import *
 from .xui import *
 from .tickets import *
 
+
+class MenuScreen:
+    """Keep the bot messages for the current interactive screen in this chat."""
+
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.update = update
+        self.context = context
+        self.message = update.effective_message
+
+    @property
+    def message_ids(self) -> list[int]:
+        return self.context.chat_data.get("menu_screen_ids", [])
+
+    async def track(self, message_id: int) -> None:
+        chat_data = self.context.chat_data
+        if chat_data.get("menu_screen_update") == self.update.update_id:
+            if message_id not in self.message_ids:
+                self.message_ids.append(message_id)
+            return
+
+        previous_ids = self.message_ids
+        chat_data["menu_screen_ids"] = [message_id]
+        chat_data["menu_screen_update"] = self.update.update_id
+        for previous_id in previous_ids:
+            if previous_id == message_id:
+                continue
+            try:
+                await self.context.bot.delete_message(self.message.chat_id, previous_id)
+            except TelegramError:
+                # A message that is too old to delete can still lose its inline buttons.
+                try:
+                    await self.context.bot.edit_message_reply_markup(
+                        chat_id=self.message.chat_id, message_id=previous_id, reply_markup=None,
+                    )
+                except TelegramError:
+                    pass
+
+    async def reply_text(self, *args, **kwargs) -> None:
+        sent = await self.message.reply_text(*args, **kwargs, do_quote=False)
+        await self.track(sent.message_id)
+
+    async def edit_text(self, *args, **kwargs) -> None:
+        await self.update.callback_query.edit_message_text(*args, **kwargs)
+        if self.message.message_id in self.message_ids:
+            await self.track(self.message.message_id)
+
+    async def remove_menu_press(self) -> None:
+        if self.message.chat.type == "private":
+            try:
+                await self.message.delete()
+            except TelegramError:
+                pass
+
+
+def discard_ticket_and_broadcast_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in ("client_waiting_ticket_text", "admin_broadcast_mode"):
+        context.user_data.pop(key, None)
+
+
+async def discard_input_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    discard_ticket_and_broadcast_input(context)
+
+
+def cancel_input_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="input:cancel")]])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     if not user or not update.message:
         return
 
+    clear_pending_input(context)
     upsert_user(user)
 
     # deep-link формата https://t.me/<bot>?start=ref_<telegram_id>
@@ -20,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("✅ Вы зарегистрированы по реферальной ссылке. Вашему пригласившему будет начисляться 25% с ваших пополнений.")
 
     if is_admin(user.id):
-        await update.message.reply_text(
+        await screen.reply_text(
             "Панель техподдержки.\n\n"
             "Снизу есть меню с быстрыми кнопками для обращений, заявок на продление/оформление, клиентов 3x-ui, продления, статистики и рассылки.\n\n"
             "Основные команды:\n"
@@ -43,16 +112,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if is_banned(user.id):
-        await update.message.reply_text("Вы заблокированы и не можете отправлять обращения.")
+        await screen.reply_text("Вы заблокированы и не можете отправлять обращения.")
         return
 
-    await update.message.reply_text(
+    await screen.reply_text(
         "Здравствуйте! Выберите действие в меню ниже.",
         reply_markup=client_main_keyboard(),
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     user_id = update.effective_user.id if update.effective_user else None
     if not update.message:
         return
@@ -93,7 +163,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         text = "Выберите действие в меню ниже."
     reply_markup = admin_main_keyboard() if is_admin(user_id) else client_main_keyboard()
-    await update.message.reply_text(text, reply_markup=reply_markup)
+    await screen.reply_text(text, reply_markup=reply_markup)
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -307,6 +377,7 @@ async def process_client_renewal_payment_choice(
     months: int,
     payment_method: str,
 ) -> None:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
@@ -318,27 +389,27 @@ async def process_client_renewal_payment_choice(
     if method == "balance":
         cost = months * user_monthly_price(user.id)
         if not xui_email:
-            await message.reply_text(
+            await screen.reply_text(
                 "Подписка не привязана к вашему Telegram ID. Администратор должен привязать её командой /linksub, после этого продление с баланса станет доступно.",
                 reply_markup=client_main_keyboard(),
             )
             return
         if balance_of(user.id) < cost:
-            await message.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
             return
         try:
             async with XuiClient() as api:
                 result = await api.renew_client(xui_email, renew_days)
         except XuiApiError as exc:
-            await message.reply_text(f"Не удалось продлить подписку: {exc}. Средства не списаны.", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"Не удалось продлить подписку: {exc}. Средства не списаны.", reply_markup=client_main_keyboard())
             return
         if not spend_balance(user.id, cost, f"Продление на {months} мес."):
-            await message.reply_text("Баланс изменился, средств уже недостаточно. Проверьте его и повторите попытку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Баланс изменился, средств уже недостаточно. Проверьте его и повторите попытку.", reply_markup=client_main_keyboard())
             return
         await notify_admins_about_balance_subscription_operation(
             context, user, "renewal", months, renew_days, cost, xui_email,
         )
-        await message.reply_text(f"✅ Подписка продлена на {renew_days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.", reply_markup=client_main_keyboard())
+        await screen.reply_text(f"✅ Подписка продлена на {renew_days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.", reply_markup=client_main_keyboard())
         return
 
     method = "stars" if method == "stars" else "manual"
@@ -361,7 +432,7 @@ async def process_client_renewal_payment_choice(
         invoice_sent = await send_stars_invoice_to_client(context, ticket_id, user.id, stars_amount, sent_by_admin_id=0)
         await notify_admins_about_renew_request(update, context, ticket_id, xui_email, months, payment_method="stars")
         if invoice_sent:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Заявка на продление создана. Номер обращения: #{ticket_id}.\n\n"
                 f"Способ оплаты: ⭐️ Tg Stars.\n"
                 f"Сумма: {stars_amount} ⭐.\n\n"
@@ -369,7 +440,7 @@ async def process_client_renewal_payment_choice(
                 reply_markup=client_main_keyboard(),
             )
         else:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Заявка на продление создана. Номер обращения: #{ticket_id}.\n\n"
                 "Не удалось автоматически отправить счёт Telegram Stars. Администратор увидит заявку и поможет с оплатой.",
                 reply_markup=client_main_keyboard(),
@@ -377,7 +448,7 @@ async def process_client_renewal_payment_choice(
         return
 
     await notify_admins_about_renew_request(update, context, ticket_id, xui_email, months, payment_method="manual")
-    await message.reply_text(
+    await screen.reply_text(
         f"Заявка на продление подписки на {month_word(months)} передана в техподдержку.\n"
         f"Номер обращения: #{ticket_id}.\n\n"
         "Способ оплаты: P2P(Перевод). Администратор пришлёт реквизиты и сумму в этом чате.",
@@ -616,6 +687,7 @@ async def process_client_subscription_payment_choice(
     months: int,
     payment_method: str,
 ) -> None:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
@@ -626,16 +698,16 @@ async def process_client_subscription_payment_choice(
     if method == "balance":
         cost = months * user_monthly_price(user.id)
         if balance_of(user.id) < cost:
-            await message.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"Недостаточно средств: нужно {cost} ₽, доступно {balance_of(user.id)} ₽. Пополните баланс в разделе «💰 Баланс».", reply_markup=client_main_keyboard())
             return
         try:
             async with XuiClient() as api:
                 result = await api.add_client(email, days, user.id)
         except XuiApiError as exc:
-            await message.reply_text(f"Не удалось создать подписку: {exc}. Средства не списаны.", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"Не удалось создать подписку: {exc}. Средства не списаны.", reply_markup=client_main_keyboard())
             return
         if not spend_balance(user.id, cost, f"Новая подписка на {months} мес."):
-            await message.reply_text("Баланс изменился, средств уже недостаточно. Созданную подписку проверьте у администратора.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Баланс изменился, средств уже недостаточно. Созданную подписку проверьте у администратора.", reply_markup=client_main_keyboard())
             return
         set_xui_link(user.id, str(result.get("email") or email))
         await notify_admins_about_balance_subscription_operation(
@@ -643,7 +715,7 @@ async def process_client_subscription_payment_choice(
         )
         link = build_subscription_link(result)
         link_text = f"\nСсылка подписки: {link}" if link else ""
-        await message.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}", reply_markup=client_main_keyboard())
+        await screen.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}", reply_markup=client_main_keyboard())
         return
 
     method = "stars" if method == "stars" else "manual"
@@ -667,7 +739,7 @@ async def process_client_subscription_payment_choice(
         stars_amount = renewal_stars_amount_for_months(months)
         invoice_sent = await send_subscription_stars_invoice_to_client(context, ticket_id, user.id, stars_amount, sent_by_admin_id=0)
         if invoice_sent:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Заявка на оформление подписки создана. Номер обращения: #{ticket_id}.\n\n"
                 f"Способ оплаты: ⭐️ Tg Stars.\n"
                 f"Сумма: {stars_amount} ⭐.\n\n"
@@ -675,14 +747,14 @@ async def process_client_subscription_payment_choice(
                 reply_markup=client_main_keyboard(),
             )
         else:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Заявка на оформление подписки создана. Номер обращения: #{ticket_id}.\n\n"
                 "Не удалось автоматически отправить счёт Telegram Stars. Администратор увидит заявку и поможет с оплатой.",
                 reply_markup=client_main_keyboard(),
             )
         return
 
-    await message.reply_text(
+    await screen.reply_text(
         f"Заявка на оформление подписки на {month_word(months)} передана в техподдержку.\n"
         f"Номер обращения: #{ticket_id}.\n\n"
         "Способ оплаты: P2P(Перевод). Администратор пришлёт реквизиты и сумму в этом чате.",
@@ -717,12 +789,13 @@ async def notify_admins_about_trial_subscription(context: ContextTypes.DEFAULT_T
 
 
 async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
         return
     if not trial_subscriptions_enabled():
-        await message.reply_text("Пробные подписки сейчас отключены.", reply_markup=client_main_keyboard())
+        await screen.reply_text("Пробные подписки сейчас отключены.", reply_markup=client_main_keyboard())
         return
 
     existing = get_trial_subscription(user.id)
@@ -731,26 +804,26 @@ async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT
         link = str(existing["subscription_link"] or "").strip()
         if str(existing["status"]) == "active" and expires_ms > int(time.time() * 1000):
             link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Ссылка не была получена из панели. Обратитесь в поддержку."
-            await message.reply_text(
+            await screen.reply_text(
                 f"🎁 Тестовая подписка уже была выдана и действует до <b>{html.escape(format_xui_datetime(expires_ms))}</b>."
                 f"{link_line}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=client_main_keyboard(),
             )
         elif str(existing["status"]) == "creating":
-            await message.reply_text("Тестовая подписка уже создаётся. Подождите немного и откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Тестовая подписка уже создаётся. Подождите немного и откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
         else:
-            await message.reply_text("Вы уже использовали тестовую подписку. Вы можете купить новую подписку.", reply_markup=subscription_purchase_keyboard(False))
+            await screen.reply_text("Вы уже использовали тестовую подписку. Вы можете купить новую подписку.", reply_markup=subscription_purchase_keyboard(False))
         return
 
     linked_email, _ = await resolve_xui_email_for_user(user.id)
     if linked_email:
-        await message.reply_text("У вас уже есть привязанная подписка. Тестовая подписка доступна только до первой подписки.", reply_markup=client_main_keyboard())
+        await screen.reply_text("У вас уже есть привязанная подписка. Тестовая подписка доступна только до первой подписки.", reply_markup=client_main_keyboard())
         return
 
     email = generate_subscription_email(user.id, f"trial_{user.username or user.id}")
     if not claim_trial_subscription(user.id, email):
-        await message.reply_text("Тестовая подписка уже была запрошена. Откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
+        await screen.reply_text("Тестовая подписка уже была запрошена. Откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
         return
 
     try:
@@ -763,7 +836,7 @@ async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT
                 summary = None
     except XuiApiError as exc:
         release_trial_subscription_claim(user.id)
-        await message.reply_text(f"Не удалось создать тестовую подписку: {exc}. Попробуйте позже.", reply_markup=client_main_keyboard())
+        await screen.reply_text(f"Не удалось создать тестовую подписку: {exc}. Попробуйте позже.", reply_markup=client_main_keyboard())
         return
 
     link = build_subscription_link(summary or result)
@@ -773,7 +846,7 @@ async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT
     activate_trial_subscription(user.id, link, expiry_ms)
     set_xui_link(user.id, created_email)
     link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Подписка создана, но панель не вернула ссылку. Напишите в поддержку."
-    await message.reply_text(
+    await screen.reply_text(
         f"🎁 Тестовая подписка на 1 день активирована до <b>{html.escape(format_xui_datetime(expiry_ms))}</b>."
         f"{link_line}",
         parse_mode=ParseMode.HTML,
@@ -862,7 +935,7 @@ async def notify_user_about_successful_subscription(
             report["errors"].append(f"Не удалось отправить клиенту предупреждение о ссылке: {exc}")
 
     try:
-        sent_count = await send_subscription_welcome_messages(context, user_id)
+        sent_count = len(await send_subscription_welcome_messages(context, user_id))
         report["welcome_messages_sent"] = sent_count
         if sent_count:
             log_message(
@@ -1060,19 +1133,28 @@ async def try_auto_create_subscription_after_stars_payment(
 
 
 async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     message = update.effective_message
     if not user or not message or not message.text:
         return False
 
     text = message.text.strip()
+    if text == "🆘 Обращение":
+        text = CLIENT_BUTTON_TICKET
+
+    if text in {
+        CLIENT_BUTTON_BALANCE, CLIENT_BUTTON_REFERRALS, CLIENT_BUTTON_TICKET,
+        CLIENT_BUTTON_CONNECTION_GUIDE, CLIENT_BUTTON_SUBSCRIPTION,
+    }:
+        clear_pending_input(context)
+        await screen.remove_menu_press()
 
     if text == CLIENT_BUTTON_BALANCE:
-        context.user_data.pop("balance_topup_method", None)
         topup_note = "Пополнение P2P проверяет администратор."
         if CRYPTO_TOPUP_ENABLED:
             topup_note = "Пополнение P2P и криптовалютой проверяет администратор."
-        await message.reply_text(
+        await screen.reply_text(
             f"💰 Ваш баланс: <b>{balance_of(user.id)} ₽</b>\n\n"
             f"{topup_note} После зачисления выберите срок подписки и оплатите её с баланса.",
             parse_mode=ParseMode.HTML,
@@ -1084,7 +1166,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         count, earned = referral_stats(user.id)
         bot_username = (await context.bot.get_me()).username
         link = f"https://t.me/{bot_username}?start=ref_{user.id}" if bot_username else f"ref_{user.id}"
-        await message.reply_text(
+        await screen.reply_text(
             f"👥 Реферальная программа\n\nВаша ссылка:\n<code>{html.escape(link)}</code>\n\n"
             f"Рефералов: <b>{count}</b>\nЗаработано: <b>{earned} ₽</b>\n\n"
             f"Вы получаете {REFERRAL_PERCENT}% с каждого подтверждённого пополнения реферала. Вознаграждение автоматически поступает на баланс.",
@@ -1094,14 +1176,12 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         return True
 
     if text == CLIENT_BUTTON_TICKET:
-        context.user_data.pop("client_waiting_renew_months", None)
-        context.user_data.pop("client_waiting_subscribe_months", None)
         with db() as conn:
             rows = conn.execute("SELECT id, status, updated_at FROM tickets WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10", (user.id,)).fetchall()
         history = "\n".join(f"#{row['id']} — {'открыто' if row['status'] == 'open' else 'закрыто'} ({row['updated_at']})" for row in rows) or "Обращений пока нет."
         buttons = [[InlineKeyboardButton(f"#{row['id']} — {'🟢' if row['status'] == 'open' else '⚪'}", callback_data=f"clientticket:view:{row['id']}")] for row in rows]
         buttons.append([InlineKeyboardButton("➕ Новое обращение", callback_data="clientticket:new")])
-        await message.reply_text(
+        await screen.reply_text(
             f"🆘 Ваши обращения:\n{history}",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -1110,25 +1190,27 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if text == CLIENT_BUTTON_CONNECTION_GUIDE:
         count = count_subscription_welcome_messages()
         if not count:
-            await message.reply_text("Инструкция по подключению пока не настроена. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Инструкция по подключению пока не настроена. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
             return True
-        sent = await send_subscription_welcome_messages(context, user.id)
-        if sent:
-            await message.reply_text("📘 Инструкции по подключению отправлены выше.", reply_markup=client_main_keyboard())
+        sent_ids = await send_subscription_welcome_messages(context, user.id)
+        if sent_ids:
+            for message_id in sent_ids:
+                await screen.track(message_id)
+            await screen.reply_text("📘 Инструкции по подключению отправлены выше.", reply_markup=client_main_keyboard())
         else:
-            await message.reply_text("Не удалось отправить инструкции. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Не удалось отправить инструкции. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
         xui_email, source = await resolve_xui_email_for_user(user.id)
         if not xui_email:
             if source.startswith("error:"):
-                await message.reply_text(
+                await screen.reply_text(
                     "Не удалось проверить подписку в панели 3x-ui. Повторите позже или обратитесь в поддержку: подробности ошибки есть в журнале сервера.",
                     reply_markup=client_main_keyboard(),
                 )
                 return True
-            await message.reply_text(
+            await screen.reply_text(
                 f"📄 Активная подписка не найдена.\n\nВы можете купить новую подписку.\nЦена: <b>{user_monthly_price(user.id)} ₽/мес.</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user.id)),
@@ -1138,15 +1220,15 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
             async with XuiClient() as api:
                 summary = await api.get_client_summary(xui_email)
         except XuiApiError as exc:
-            await message.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
             return True
         if not summary:
-            await message.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
             return True
         link = build_subscription_link(summary)
         expiry = format_xui_datetime(safe_int(summary.get("expiry_ms")))
         link_line = f"\n\n🔗 Ваша ссылка подписки:\n{link}" if link else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
-        await message.reply_text(
+        await screen.reply_text(
             f"📄 Ваша подписка\nEmail: <code>{html.escape(xui_email)}</code>\nДействует до: <b>{html.escape(expiry)}</b>{link_line}",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Продлить подписку", callback_data="subscription:renew")]]),
@@ -1156,7 +1238,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if context.user_data.get("client_waiting_renew_months"):
         months = parse_months_from_text(text)
         if months is None:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Укажите количество месяцев числом от 1 до {XUI_MAX_RENEW_MONTHS}.\n"
                 "Например: 1, 3, 6 или 12.",
                 reply_markup=client_main_keyboard(),
@@ -1167,7 +1249,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         context.user_data["client_renew_months"] = months
         monthly_price = user_monthly_price(user.id)
         total_price = months * monthly_price
-        await message.reply_text(
+        await screen.reply_text(
             f"Вы выбрали продление на {month_word(months)}.\n"
             f"Цена: <b>{monthly_price} ₽/мес.</b> · Итого: <b>{total_price} ₽</b>.\n\n"
             "Выберите способ оплаты:",
@@ -1182,7 +1264,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         except ValueError:
             amount = 0
         if amount < BALANCE_MIN_TOPUP_RUB or amount > BALANCE_MAX_TOPUP_RUB:
-            await message.reply_text(f"Введите целую сумму от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB} ₽.")
+            await screen.reply_text(f"Введите целую сумму от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB} ₽.")
             return True
         method = str(context.user_data.pop("balance_topup_method"))
         topup_id = create_balance_topup(user.id, amount, method)
@@ -1197,7 +1279,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
                     )
                 except TelegramError:
                     pass
-        await message.reply_text(
+        await screen.reply_text(
             f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n"
             "Дождитесь реквизитов от администратора. После перевода появится кнопка подтверждения.",
             parse_mode=ParseMode.HTML,
@@ -1208,7 +1290,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if context.user_data.get("client_waiting_stars_months"):
         months = parse_months_from_text(text)
         if months is None:
-            await message.reply_text(f"Укажите число от 1 до {XUI_MAX_RENEW_MONTHS}.")
+            await screen.reply_text(f"Укажите число от 1 до {XUI_MAX_RENEW_MONTHS}.")
             return True
         context.user_data.pop("client_waiting_stars_months", None)
         xui_email, _ = await resolve_xui_email_for_user(user.id)
@@ -1221,7 +1303,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
     if context.user_data.get("client_waiting_subscribe_months"):
         months = parse_months_from_text(text)
         if months is None:
-            await message.reply_text(
+            await screen.reply_text(
                 f"Укажите количество месяцев числом от 1 до {XUI_MAX_RENEW_MONTHS}.\n"
                 "Например: 1, 3, 6 или 12.",
                 reply_markup=client_main_keyboard(),
@@ -1232,7 +1314,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         context.user_data["client_subscribe_months"] = months
         monthly_price = user_monthly_price(user.id)
         total_price = months * monthly_price
-        await message.reply_text(
+        await screen.reply_text(
             f"Вы выбрали оформление подписки на {month_word(months)}.\n"
             f"Цена: <b>{monthly_price} ₽/мес.</b> · Итого: <b>{total_price} ₽</b>.\n\n"
             "Выберите способ оплаты:",
@@ -1245,6 +1327,7 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
 
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
@@ -1253,7 +1336,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     upsert_user(user)
 
     if is_banned(user.id):
-        await message.reply_text("Вы заблокированы и не можете отправлять обращения.")
+        await screen.reply_text("Вы заблокированы и не можете отправлять обращения.")
         return
 
     if await handle_client_menu_button(update, context):
@@ -1262,7 +1345,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     create_new_ticket = bool(context.user_data.pop("client_waiting_ticket_text", None))
     ticket_id = create_ticket(user.id) if create_new_ticket else get_latest_open_ticket(user.id)
     if not ticket_id:
-        await message.reply_text(
+        await screen.reply_text(
             "Чтобы создать обращение, откройте «💬 Обращения» и нажмите «➕ Новое обращение».",
             reply_markup=client_main_keyboard(),
         )
@@ -1276,7 +1359,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id=user.id,
     )
     await notify_admins_about_user_message(update, context, ticket_id)
-    await message.reply_text(
+    await screen.reply_text(
         f"Ваше сообщение передано в техподдержку. Номер обращения: #{ticket_id}.",
         reply_markup=client_main_keyboard(),
     )
@@ -1438,7 +1521,7 @@ async def handle_admin_renewal_input(update: Update, context: ContextTypes.DEFAU
 
 
 async def ask_admin_for_renewal_input(
-    source_message,
+    screen: MenuScreen,
     context: ContextTypes.DEFAULT_TYPE,
     ticket_id: int,
     *,
@@ -1446,11 +1529,11 @@ async def ask_admin_for_renewal_input(
 ) -> None:
     request = get_renewal_request(ticket_id)
     if not request:
-        await source_message.reply_text("Заявка на продление не найдена.")
+        await screen.reply_text("Заявка на продление не найдена.")
         return
 
     if str(request["status"]) == "renewed":
-        await source_message.reply_text(
+        await screen.reply_text(
             f"Заявка #{ticket_id} уже продлена. Дата продления: {request['renewed_at'] or 'неизвестно'}."
         )
         return
@@ -1495,7 +1578,7 @@ async def ask_admin_for_renewal_input(
             "Введите email клиента и количество дней через пробел. После успешной проверки бот запишет tgId клиента в панель 3x-ui и сохранит локальную привязку:\n"
             f"<code>client_email {request['days']}</code>"
         )
-    await source_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_main_keyboard())
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_main_keyboard())
 
 
 async def handle_admin_subscription_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1540,13 +1623,13 @@ async def handle_admin_subscription_input(update: Update, context: ContextTypes.
     return True
 
 
-async def ask_admin_for_subscription_input(source_message, context: ContextTypes.DEFAULT_TYPE, ticket_id: int) -> None:
+async def ask_admin_for_subscription_input(screen: MenuScreen, context: ContextTypes.DEFAULT_TYPE, ticket_id: int) -> None:
     request = get_subscription_request(ticket_id)
     if not request:
-        await source_message.reply_text("Заявка на оформление не найдена.")
+        await screen.reply_text("Заявка на оформление не найдена.")
         return
     if str(request["status"]) == "created":
-        await source_message.reply_text(f"По заявке #{ticket_id} клиент уже создан.")
+        await screen.reply_text(f"По заявке #{ticket_id} клиент уже создан.")
         return
     context.user_data["admin_waiting_subscription_ticket_id"] = ticket_id
     email = str(request["xui_email"] or "").strip()
@@ -1567,7 +1650,7 @@ async def ask_admin_for_subscription_input(source_message, context: ContextTypes
         )
     else:
         text = base + "Введите email нового клиента и количество дней:\n" + f"<code>client_email {request['days']}</code>"
-    await source_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_main_keyboard())
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_main_keyboard())
 
 
 async def send_stars_invoice_for_renewal(
@@ -1734,7 +1817,7 @@ def trial_settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="trialsettings:toggle")]])
 
 
-async def send_admin_notification_settings(message: Message, admin_id: int) -> None:
+async def send_admin_notification_settings(screen: MenuScreen, admin_id: int) -> None:
     admin = get_user(admin_id)
     name = " ".join(filter(None, [admin["first_name"], admin["last_name"]])) if admin else "не запускал бота"
     settings = get_admin_notification_settings(admin_id)
@@ -1745,15 +1828,20 @@ async def send_admin_notification_settings(message: Message, admin_id: int) -> N
         "Типы уведомлений:",
     ]
     lines.extend(f"{'✅' if enabled else '❌'} {label}" for kind, label in ADMIN_NOTIFICATION_TYPES.items() for enabled in [settings[kind]])
-    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=admin_notification_keyboard(admin_id))
+    await screen.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=admin_notification_keyboard(admin_id))
 
 
 async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    screen = MenuScreen(update, context)
     message = update.effective_message
     if not message or not message.text:
         return False
 
     text = message.text.strip()
+    text = {
+        "📣 Рассылка": ADMIN_BUTTON_BROADCAST_ALL,
+        "🔄 Обновить меню": ADMIN_BUTTON_REFRESH_MENUS,
+    }.get(text, text)
 
     sections = {
         ADMIN_BUTTON_REQUESTS_GROUP: ("📥 Заявки", "requests"),
@@ -1762,98 +1850,73 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         ADMIN_BUTTON_CLIENTS_GROUP: ("👥 Клиенты", "clients"),
         ADMIN_BUTTON_SERVICE_GROUP: ("⚙️ Сервис", "service"),
     }
+    commands = {
+        ADMIN_BUTTON_TICKETS: tickets_command,
+        ADMIN_BUTTON_HISTORY: history_command,
+        ADMIN_BUTTON_NEW_CLIENT_MESSAGES: subscription_messages_command,
+        ADMIN_BUTTON_RENEW_REQUESTS: renewal_requests_command,
+        ADMIN_BUTTON_SUBSCRIPTION_REQUESTS: subscription_requests_command,
+        ADMIN_BUTTON_SUBSCRIPTION_EVENTS: subscription_events_command,
+        ADMIN_BUTTON_CLIENTS: clients_command,
+        ADMIN_BUTTON_INBOUNDS: inbounds_command,
+        ADMIN_BUTTON_XUI_STATUS: xui_status_command,
+        ADMIN_BUTTON_STATS: stats_command,
+        ADMIN_BUTTON_USERS: users_command,
+        ADMIN_BUTTON_TOPUPS: topups_command,
+        ADMIN_BUTTON_REFRESH_MENUS: update_menus_command,
+        ADMIN_BUTTON_HELP: help_command,
+    }
+    other_buttons = {
+        ADMIN_BUTTON_BACK, ADMIN_BUTTON_ADMIN_SETTINGS, ADMIN_BUTTON_TRIAL_SETTINGS,
+        ADMIN_BUTTON_BROADCAST_ALL, ADMIN_BUTTON_BROADCAST_ACTIVE, ADMIN_BUTTON_RENEW,
+    }
+    if text not in sections and text not in commands and text not in other_buttons:
+        return False
+
+    clear_pending_input(context)
+    await screen.remove_menu_press()
+
     if text in sections:
         title, section = sections[text]
         admin_id = update.effective_user.id if update.effective_user else None
-        await message.reply_text(title, reply_markup=admin_section_keyboard(section, admin_id))
+        await screen.reply_text(title, reply_markup=admin_section_keyboard(section, admin_id))
+        return True
+
+    if text in commands:
+        await commands[text](update, context)
         return True
 
     if text == ADMIN_BUTTON_BACK:
-        await message.reply_text("Главное меню администратора.", reply_markup=admin_main_keyboard())
+        await screen.reply_text("Главное меню администратора.", reply_markup=admin_main_keyboard())
         return True
 
     if text == ADMIN_BUTTON_ADMIN_SETTINGS:
         if not is_super_admin(update.effective_user.id if update.effective_user else None):
-            await message.reply_text("Настройка администраторов доступна только главному администратору.")
+            await screen.reply_text("Настройка администраторов доступна только главному администратору.")
             return True
-        await message.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
+        await screen.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
         return True
 
     if text == ADMIN_BUTTON_TRIAL_SETTINGS:
         if not is_super_admin(update.effective_user.id if update.effective_user else None):
-            await message.reply_text("Настройка пробных подписок доступна только главному администратору.")
+            await screen.reply_text("Настройка пробных подписок доступна только главному администратору.")
             return True
         state = "✅ включены" if trial_subscriptions_enabled() else "❌ отключены"
-        await message.reply_text(f"🎁 Пробные подписки сейчас {state}.", reply_markup=trial_settings_keyboard())
-        return True
-
-    if text == ADMIN_BUTTON_TICKETS:
-        await tickets_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_HISTORY:
-        await history_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_NEW_CLIENT_MESSAGES:
-        await subscription_messages_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_RENEW_REQUESTS:
-        await renewal_requests_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_SUBSCRIPTION_REQUESTS:
-        await subscription_requests_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_SUBSCRIPTION_EVENTS:
-        await subscription_events_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_CLIENTS:
-        await clients_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_INBOUNDS:
-        await inbounds_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_XUI_STATUS:
-        await xui_status_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_STATS:
-        await stats_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_USERS:
-        await users_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_TOPUPS:
-        await topups_command(update, context)
+        await screen.reply_text(f"🎁 Пробные подписки сейчас {state}.", reply_markup=trial_settings_keyboard())
         return True
 
     if text in {ADMIN_BUTTON_BROADCAST_ALL, ADMIN_BUTTON_BROADCAST_ACTIVE}:
-        context.user_data["admin_broadcast_mode"] = "active" if text == ADMIN_BUTTON_BROADCAST_ACTIVE else "all"
-        audience = "только клиентам с действующей подпиской" if context.user_data["admin_broadcast_mode"] == "active" else "всем незаблокированным пользователям"
-        await message.reply_text(
+        mode = "active" if text == ADMIN_BUTTON_BROADCAST_ACTIVE else "all"
+        audience = "только клиентам с действующей подпиской" if mode == "active" else "всем незаблокированным пользователям"
+        await screen.reply_text(
             f"Отправьте текст рассылки одним сообщением. Он будет отправлен {audience}.",
-            reply_markup=admin_main_keyboard(),
+            reply_markup=cancel_input_keyboard(),
         )
-        return True
-
-    if text == ADMIN_BUTTON_REFRESH_MENUS:
-        await update_menus_command(update, context)
-        return True
-
-    if text == ADMIN_BUTTON_HELP:
-        await help_command(update, context)
+        context.user_data["admin_broadcast_mode"] = mode
         return True
 
     if text == ADMIN_BUTTON_RENEW:
-        await message.reply_text(
+        await screen.reply_text(
             "Для обычной заявки на продление используйте номер обращения:\n"
             "/renewticket TICKET_ID — продлить по заявке и уведомить клиента\n\n"
             "Также доступны ручные команды:\n"
@@ -1873,10 +1936,10 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not admin or not message:
         return
 
-    if await handle_admin_subscription_message_recording(update, context):
+    if await handle_admin_menu_button(update, context):
         return
 
-    if await handle_admin_menu_button(update, context):
+    if await handle_admin_subscription_message_recording(update, context):
         return
 
     if context.user_data.get("admin_waiting_new_admin"):
@@ -1898,15 +1961,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     broadcast_mode = context.user_data.get("admin_broadcast_mode")
     if broadcast_mode:
+        screen = MenuScreen(update, context)
         text = (message.text or "").strip()
         if not text:
-            await message.reply_text("Для рассылки отправьте текстовым сообщением.", reply_markup=admin_main_keyboard())
+            await screen.reply_text("Для рассылки отправьте текстовым сообщением.", reply_markup=cancel_input_keyboard())
             return
         if broadcast_mode == "active":
             try:
                 recipient_ids = await active_client_broadcast_recipient_ids()
             except XuiApiError as exc:
-                await message.reply_text(f"Не удалось проверить активные подписки в 3x-ui: {exc}. Повторите отправку сообщения.", reply_markup=admin_main_keyboard())
+                await screen.reply_text(f"Не удалось проверить активные подписки в 3x-ui: {exc}. Повторите отправку сообщения.", reply_markup=cancel_input_keyboard())
                 return
             audience = "активным клиентам"
         else:
@@ -1916,7 +1980,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             audience = "всем пользователям"
         context.user_data.pop("admin_broadcast_mode", None)
         ok, failed = await broadcast_text_to_users(context, text, recipient_ids)
-        await message.reply_text(f"Рассылка {audience} завершена. Отправлено: {ok}, ошибок: {failed}.", reply_markup=admin_main_keyboard())
+        await screen.reply_text(f"Рассылка {audience} завершена. Отправлено: {ok}, ошибок: {failed}.", reply_markup=admin_main_keyboard())
         return
 
     if await handle_admin_stars_invoice_input(update, context):
@@ -2075,81 +2139,87 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @require_admin
 async def tickets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /tickets 2")
+            await screen.reply_text("Страница должна быть числом. Например: /tickets 2")
             return
 
     rows, page, pages = list_open_tickets(page)
     total = count_open_tickets()
     text, keyboard = format_tickets_list_page(rows, page, pages, total)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 
 @require_admin
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /history 2")
+            await screen.reply_text("Страница должна быть числом. Например: /history 2")
             return
 
     rows, page, pages, total = list_all_tickets(page)
     text, keyboard = format_ticket_history_page(rows, page, pages, total)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 @require_admin
 async def renewal_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /renewals 2")
+            await screen.reply_text("Страница должна быть числом. Например: /renewals 2")
             return
 
     rows, page, pages, total = list_renewal_requests(page)
     text, keyboard = format_renewal_requests_page(rows, page, pages, total)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 @require_admin
 async def subscription_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /subscriptions 2")
+            await screen.reply_text("Страница должна быть числом. Например: /subscriptions 2")
             return
 
     rows, page, pages, total = list_subscription_requests(page)
     text, keyboard = format_subscription_requests_page(rows, page, pages, total)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 @require_admin
 async def subscription_events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /subscriptionevents 2")
+            await screen.reply_text("Страница должна быть числом. Например: /subscriptionevents 2")
             return
     rows, page, pages, total = list_subscription_events(page)
     text, keyboard = format_subscription_events_page(rows, page, pages, total)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 @require_admin
 async def subscription_messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     if not update.message:
         return
     count = count_subscription_welcome_messages()
@@ -2160,7 +2230,7 @@ async def subscription_messages_command(update: Update, context: ContextTypes.DE
             [InlineKeyboardButton("🗑 Очистить", callback_data="submsgclear:1")],
         ]
     )
-    await update.message.reply_text(
+    await screen.reply_text(
         "Сообщения новым клиентам после создания подписки.\n\n"
         f"Сейчас сохранено сообщений: {count}.\n\n"
         "Чтобы задать сообщения, нажмите «📝 Записать заново» или используйте /setsubmessages. "
@@ -2206,21 +2276,23 @@ async def clear_subscription_messages_command(update: Update, context: ContextTy
     await update.message.reply_text(f"Удалено сообщений: {deleted}.", reply_markup=admin_main_keyboard())
 
 
-async def preview_subscription_messages(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def preview_subscription_messages(screen: MenuScreen, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = screen.message
     rows = list_subscription_welcome_messages()
     if not rows:
-        await message.reply_text("Сообщения для новых клиентов пока не заданы.", reply_markup=admin_main_keyboard())
+        await screen.reply_text("Сообщения для новых клиентов пока не заданы.", reply_markup=admin_main_keyboard())
         return
-    await message.reply_text(f"Предпросмотр сообщений для новых клиентов: {len(rows)} шт.")
+    await screen.reply_text(f"Предпросмотр сообщений для новых клиентов: {len(rows)} шт.")
     for row in rows:
         try:
-            await context.bot.copy_message(
+            copied = await context.bot.copy_message(
                 chat_id=message.chat_id,
                 from_chat_id=int(row["source_chat_id"]),
                 message_id=int(row["source_message_id"]),
             )
+            await screen.track(copied.message_id)
         except TelegramError as exc:
-            await message.reply_text(f"Не удалось показать сообщение #{row['id']}: {exc}")
+            await screen.reply_text(f"Не удалось показать сообщение #{row['id']}: {exc}")
 
 
 async def handle_admin_subscription_message_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2392,6 +2464,7 @@ async def format_client_xray_logs(lines: list[str]) -> str:
 
 @require_admin
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     with db() as conn:
         rows = conn.execute(
             """
@@ -2412,14 +2485,14 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             """
         ).fetchall()
     if not rows:
-        await update.message.reply_text("Пользователей пока нет.")
+        await screen.reply_text("Пользователей пока нет.")
         return
 
     keyboard = [[InlineKeyboardButton(
         f"{'🚫 ' if row['is_banned'] else '👤 '}{row['first_name'] or row['user_id']} · {row['user_id']}",
         callback_data=f"userdetail:{row['user_id']}",
     )] for row in rows]
-    await update.message.reply_text("👤 Пользователи\nВыберите клиента:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await screen.reply_text("👤 Пользователи\nВыберите клиента:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 @require_admin
@@ -2456,6 +2529,7 @@ async def setreferrer_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @require_admin
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     with db() as conn:
         stats = {
             "users": conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"],
@@ -2465,7 +2539,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "messages": conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"],
             "admins": conn.execute("SELECT COUNT(*) AS c FROM admins").fetchone()["c"],
         }
-    await update.message.reply_text(
+    await screen.reply_text(
         "Статистика:\n"
         f"Пользователей: {stats['users']}\n"
         f"Заблокировано: {stats['banned']}\n"
@@ -2478,10 +2552,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @require_admin
 async def topups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     with db() as conn:
         pending_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status = 'pending'").fetchone()[0])
         history_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status != 'pending'").fetchone()[0])
-    await update.message.reply_text(
+    await screen.reply_text(
         "💳 Пополнения\nВыберите список:",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🕐 Текущие ({pending_count})", callback_data="topups:pending:1")],
@@ -2490,7 +2565,7 @@ async def topups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-async def show_topups_page(message, kind: str, page: int) -> None:
+async def show_topups_page(screen: MenuScreen, kind: str, page: int) -> None:
     """Список текущих или завершённых заявок на пополнение для администратора."""
     kind = "pending" if kind == "pending" else "history"
     page = max(1, page)
@@ -2506,7 +2581,7 @@ async def show_topups_page(message, kind: str, page: int) -> None:
     page = min(page, pages)
     title = "🕐 Текущие пополнения" if kind == "pending" else "🗂 История пополнений"
     if not rows:
-        await message.reply_text(f"{title}\n\nЗаписей нет.")
+        await screen.reply_text(f"{title}\n\nЗаписей нет.")
         return
     status_icon = {"pending": "🕐", "confirmed": "✅", "cancelled": "❌"}
     buttons = [
@@ -2524,32 +2599,33 @@ async def show_topups_page(message, kind: str, page: int) -> None:
     if nav:
         buttons.append(nav)
     buttons.append([InlineKeyboardButton("↩️ К спискам", callback_data="topupsmenu:show")])
-    await message.reply_text(f"{title}\nСтраница {page}/{pages} · всего: {total}", reply_markup=InlineKeyboardMarkup(buttons))
+    await screen.reply_text(f"{title}\nСтраница {page}/{pages} · всего: {total}", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @require_admin
 async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     page = 1
     if context.args:
         try:
             page = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Страница должна быть числом. Например: /clients 2")
+            await screen.reply_text("Страница должна быть числом. Например: /clients 2")
             return
 
     try:
         async with XuiClient() as api:
             clients = await api.list_clients()
     except XuiApiError as exc:
-        await update.message.reply_text(f"Ошибка 3x-ui: {exc}")
+        await screen.reply_text(f"Ошибка 3x-ui: {exc}")
         return
 
     if not clients:
-        await update.message.reply_text("В 3x-ui не найдено клиентов.")
+        await screen.reply_text("В 3x-ui не найдено клиентов.")
         return
 
     text, keyboard = format_xui_clients_page(clients, page)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await screen.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 def _status_number(value: Any) -> float:
@@ -2687,6 +2763,7 @@ def format_xui_status_card(title: str, status: dict[str, Any], node_state: Optio
 
 @require_admin
 async def xui_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     try:
         async with XuiClient() as api:
             status = await api.get_server_status()
@@ -2696,42 +2773,43 @@ async def xui_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except XuiApiError as exc:
                 nodes, nodes_error = [], str(exc)
     except XuiApiError as exc:
-        await update.message.reply_text(f"Ошибка 3x-ui: {exc}")
+        await screen.reply_text(f"Ошибка 3x-ui: {exc}")
         return
 
     if not status:
-        await update.message.reply_text("Подключение к 3x-ui есть, но основная панель не вернула статус сервера.")
+        await screen.reply_text("Подключение к 3x-ui есть, но основная панель не вернула статус сервера.")
         return
-    await update.message.reply_text(format_xui_status_card("Основная панель", status), parse_mode=ParseMode.HTML)
+    await screen.reply_text(format_xui_status_card("Основная панель", status), parse_mode=ParseMode.HTML)
     if nodes_error:
-        await update.message.reply_text(f"⚠️ Не удалось получить список нод: {nodes_error}")
+        await screen.reply_text(f"⚠️ Не удалось получить список нод: {nodes_error}")
         return
     if not nodes:
-        await update.message.reply_text("Ноды, подключённые к основной панели, не найдены.")
+        await screen.reply_text("Ноды, подключённые к основной панели, не найдены.")
         return
-    await update.message.reply_text(f"🌐 Подключённые ноды: {len(nodes)}")
+    await screen.reply_text(f"🌐 Подключённые ноды: {len(nodes)}")
     for index, node in enumerate(nodes, start=1):
         name = str(_status_value(node, "name", "remark", "address") or f"Нода #{index}")
         address = str(node.get("address") or "").strip()
         if address and address not in name:
             name = f"{name} · {address}"
         node_state = str(node.get("status") or ("включена" if node.get("enable", True) else "выключена"))
-        await update.message.reply_text(format_xui_status_card(name, node, node_state), parse_mode=ParseMode.HTML)
+        await screen.reply_text(format_xui_status_card(name, node, node_state), parse_mode=ParseMode.HTML)
 
 
 @require_admin
 async def inbounds_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     if not update.message:
         return
     try:
         async with XuiClient() as api:
             inbounds = await api.list_inbounds()
     except XuiApiError as exc:
-        await update.message.reply_text(f"Ошибка 3x-ui: {exc}")
+        await screen.reply_text(f"Ошибка 3x-ui: {exc}")
         return
 
     if not inbounds:
-        await update.message.reply_text("В 3x-ui не найдено ни одного inbound.")
+        await screen.reply_text("В 3x-ui не найдено ни одного inbound.")
         return
 
     lines = ["<b>Inbounds 3x-ui</b>"]
@@ -2760,7 +2838,7 @@ async def inbounds_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"(<code>{protocol}</code>, порт <code>{port}</code>, {enabled}, клиентов: <code>{client_count}</code>)"
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await screen.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 @require_admin
@@ -3227,6 +3305,7 @@ async def send_actual_menu_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: 
 
 @require_admin
 async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     if not update.message:
         return
 
@@ -3248,7 +3327,7 @@ async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             failed += 1
 
-    await update.message.reply_text(
+    await screen.reply_text(
         f"Обновление меню завершено. Отправлено: {ok}, ошибок: {failed}, пропущено: {skipped}.",
         reply_markup=admin_main_keyboard(),
     )
@@ -3300,27 +3379,43 @@ async def del_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Админ {admin_id} удалён.")
 
 
+def clear_pending_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        "admin_broadcast_mode",
+        "admin_edit_user_balance",
+        "admin_edit_user_price",
+        "admin_edit_user_referrer",
+        "admin_linking_xui_email_user_id",
+        "admin_recording_subscription_messages",
+        "admin_sending_balance_details_topup_id",
+        "admin_sending_payment_details_ticket_id",
+        "admin_sending_subscription_payment_details_ticket_id",
+        "admin_waiting_delete_user_id",
+        "admin_waiting_direct_renew_user_id",
+        "admin_waiting_new_admin",
+        "admin_waiting_renew_no_link_ticket_id",
+        "admin_waiting_renew_ticket_id",
+        "admin_waiting_stars_invoice_ticket_id",
+        "admin_waiting_subscription_ticket_id",
+        "balance_topup_method",
+        "client_renew_months",
+        "client_subscribe_months",
+        "client_waiting_renew_months",
+        "client_waiting_stars_months",
+        "client_waiting_subscribe_months",
+        "client_waiting_ticket_text",
+        "reply_to_ticket_id",
+    ):
+        context.user_data.pop(key, None)
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
-    context.user_data.pop("reply_to_ticket_id", None)
-    context.user_data.pop("admin_waiting_renew_ticket_id", None)
-    context.user_data.pop("admin_waiting_renew_no_link_ticket_id", None)
-    context.user_data.pop("admin_waiting_direct_renew_user_id", None)
-    context.user_data.pop("admin_waiting_delete_user_id", None)
-    context.user_data.pop("admin_sending_payment_details_ticket_id", None)
-    context.user_data.pop("admin_waiting_stars_invoice_ticket_id", None)
-    context.user_data.pop("admin_sending_subscription_payment_details_ticket_id", None)
-    context.user_data.pop("admin_sending_balance_details_topup_id", None)
-    context.user_data.pop("admin_edit_user_price", None)
-    context.user_data.pop("admin_waiting_new_admin", None)
-    context.user_data.pop("admin_broadcast_mode", None)
-    context.user_data.pop("admin_waiting_subscription_ticket_id", None)
-    context.user_data.pop("admin_recording_subscription_messages", None)
-    context.user_data.pop("client_waiting_subscribe_months", None)
-    context.user_data.pop("client_subscribe_months", None)
-    context.user_data.pop("client_waiting_ticket_text", None)
-    await update.message.reply_text("Действие отменено.")
+    clear_pending_input(context)
+    user_id = update.effective_user.id if update.effective_user else None
+    keyboard = admin_main_keyboard() if is_admin(user_id) else client_main_keyboard()
+    await MenuScreen(update, context).reply_text("Действие отменено.", reply_markup=keyboard)
 
 
 async def reject_renewal_ticket(
@@ -3380,9 +3475,10 @@ async def reject_renewal_ticket(
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    screen = MenuScreen(update, context)
     query = update.callback_query
     user = update.effective_user
-    if not query or not user:
+    if not query or not user or not isinstance(screen.message, Message):
         return
     await query.answer()
 
@@ -3392,14 +3488,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "noop":
         return
 
+    if action == "input" and value == "cancel":
+        if screen.message.message_id not in screen.message_ids:
+            return
+        if is_admin(user.id) and context.user_data.get("admin_broadcast_mode"):
+            clear_pending_input(context)
+            await screen.reply_text("Рассылка отменена.", reply_markup=admin_section_keyboard("service", user.id))
+        elif context.user_data.get("client_waiting_ticket_text"):
+            clear_pending_input(context)
+            await screen.reply_text("Создание обращения отменено.", reply_markup=client_main_keyboard())
+        return
+
+    discard_ticket_and_broadcast_input(context)
+
     if action == "balance":
         if value not in {"p2p", "crypto"}:
             return
         if value == "crypto" and not CRYPTO_TOPUP_ENABLED:
-            await query.message.reply_text("Криптопополнение сейчас отключено.")
+            await screen.reply_text("Криптопополнение сейчас отключено.")
             return
         context.user_data["balance_topup_method"] = value
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Введите сумму пополнения в ₽ (от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB}).\n"
             "Эта сумма будет зачислена на внутренний баланс после оплаты/подтверждения.",
             reply_markup=client_main_keyboard(),
@@ -3412,7 +3521,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with db() as conn:
             pending_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status = 'pending'").fetchone()[0])
             history_count = int(conn.execute("SELECT COUNT(*) FROM balance_topups WHERE status != 'pending'").fetchone()[0])
-        await query.message.reply_text(
+        await screen.reply_text(
             "💳 Пополнения\nВыберите список:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"🕐 Текущие ({pending_count})", callback_data="topups:pending:1")],
@@ -3423,19 +3532,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "topups":
         if not is_admin(user.id):
-            await query.message.reply_text("Список пополнений доступен только администраторам.")
+            await screen.reply_text("Список пополнений доступен только администраторам.")
             return
         try:
             kind, page_raw = value.split(":", 1)
             page = int(page_raw)
         except ValueError:
             return
-        await show_topups_page(query.message, kind, page)
+        await show_topups_page(screen, kind, page)
         return
 
     if action == "topupdetails":
         if not is_admin(user.id):
-            await query.message.reply_text("Реквизиты может отправить только администратор.")
+            await screen.reply_text("Реквизиты может отправить только администратор.")
             return
         try:
             topup_id = int(value)
@@ -3443,10 +3552,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         topup = get_balance_topup(topup_id)
         if not topup or str(topup["status"]) != "pending":
-            await query.message.reply_text("Заявка уже обработана или не найдена.")
+            await screen.reply_text("Заявка уже обработана или не найдена.")
             return
         context.user_data["admin_sending_balance_details_topup_id"] = topup_id
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Отправьте реквизиты для пополнения #{topup_id}. Это сообщение будет переслано клиенту {topup['user_id']}.\nДля отмены используйте /cancel.",
             reply_markup=admin_main_keyboard(),
         )
@@ -3459,7 +3568,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         topup = get_balance_topup(topup_id)
         if not topup or int(topup["user_id"]) != user.id or str(topup["status"]) != "pending":
-            await query.message.reply_text("Заявка на пополнение не найдена или уже обработана.")
+            await screen.reply_text("Заявка на пополнение не найдена или уже обработана.")
             return
         for admin_id in get_admin_ids_for_notification("payments"):
             try:
@@ -3470,7 +3579,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             except TelegramError:
                 pass
-        await query.message.reply_text("Подтверждение передано администратору. Баланс будет зачислен после проверки.", reply_markup=client_main_keyboard())
+        await screen.reply_text("Подтверждение передано администратору. Баланс будет зачислен после проверки.", reply_markup=client_main_keyboard())
         return
 
     if action == "topupcancel":
@@ -3480,15 +3589,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         topup = get_balance_topup(topup_id)
         if not topup:
-            await query.message.reply_text("Заявка на пополнение не найдена.")
+            await screen.reply_text("Заявка на пополнение не найдена.")
             return
         # Клиент может отменить только свою заявку, администратор — любую.
         if not is_admin(user.id) and int(topup["user_id"]) != user.id:
-            await query.message.reply_text("Эта заявка вам не принадлежит.")
+            await screen.reply_text("Эта заявка вам не принадлежит.")
             return
         cancelled = cancel_balance_topup(topup_id)
         if not cancelled:
-            await query.message.reply_text("Заявка уже обработана и не может быть отменена.")
+            await screen.reply_text("Заявка уже обработана и не может быть отменена.")
             return
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -3499,12 +3608,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.send_message(chat_id=int(cancelled["user_id"]), text=f"❌ Пополнение #{topup_id} отменено администратором. Баланс не изменён.", reply_markup=client_main_keyboard())
             except TelegramError:
                 pass
-        await query.message.reply_text(f"Пополнение #{topup_id} отменено. Баланс не изменён.", reply_markup=admin_main_keyboard() if is_admin(user.id) else client_main_keyboard())
+        await screen.reply_text(f"Пополнение #{topup_id} отменено. Баланс не изменён.", reply_markup=admin_main_keyboard() if is_admin(user.id) else client_main_keyboard())
         return
 
     if action == "topupconfirm":
         if not is_admin(user.id):
-            await query.message.reply_text("Подтверждать пополнения могут только администраторы.")
+            await screen.reply_text("Подтверждать пополнения могут только администраторы.")
             return
         try:
             topup_id = int(value)
@@ -3512,19 +3621,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         topup = confirm_balance_topup(topup_id, user.id)
         if not topup:
-            await query.message.reply_text("Это пополнение уже обработано или не найдено.")
+            await screen.reply_text("Это пополнение уже обработано или не найдено.")
             return
         try:
             await context.bot.send_message(chat_id=int(topup["user_id"]), text=f"✅ Баланс пополнен на {topup['amount']} ₽. Текущий баланс: {balance_of(int(topup['user_id']))} ₽.", reply_markup=client_main_keyboard())
         except TelegramError:
             pass
-        await query.message.reply_text(f"Пополнение #{topup_id} зачислено. Реферальная награда (если есть) начислена автоматически.")
+        await screen.reply_text(f"Пополнение #{topup_id} зачислено. Реферальная награда (если есть) начислена автоматически.")
         return
 
     if action == "subscription":
         if value == "renew":
             context.user_data["client_waiting_renew_months"] = True
-            await query.message.reply_text(
+            await screen.reply_text(
                 f"На сколько месяцев хотите продлить подписку?\n"
                 f"Цена: <b>{user_monthly_price(user.id)} ₽/мес.</b>\n"
                 f"Введите число от 1 до {XUI_MAX_RENEW_MONTHS}.",
@@ -3533,19 +3642,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         elif value == "buy":
             context.user_data["client_waiting_subscribe_months"] = True
-            await query.message.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+            await screen.reply_text(f"На сколько месяцев хотите оформить подписку?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
         elif value == "trial":
             await issue_trial_subscription(update, context)
         return
 
     if action == "starsbuy":
         context.user_data["client_waiting_stars_months"] = True
-        await query.message.reply_text(f"На сколько месяцев купить/продлить подписку за Stars?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
+        await screen.reply_text(f"На сколько месяцев купить/продлить подписку за Stars?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
         return
 
     if action == "clientticket" and value == "new":
+        if is_admin(user.id) or is_banned(user.id):
+            return
+        clear_pending_input(context)
+        await screen.reply_text(
+            "Опишите проблему одним сообщением — я передам его в поддержку.",
+            reply_markup=cancel_input_keyboard(),
+        )
         context.user_data["client_waiting_ticket_text"] = True
-        await query.message.reply_text("Опишите проблему одним сообщением — я передам его в поддержку.", reply_markup=client_main_keyboard())
         return
 
     if action == "clientticket" and value.startswith("view:"):
@@ -3555,31 +3670,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         ticket = get_ticket(ticket_id)
         if not ticket or int(ticket["user_id"]) != user.id:
-            await query.message.reply_text("Обращение не найдено.")
+            await screen.reply_text("Обращение не найдено.")
             return
         chunks = build_ticket_full_chat_chunks(ticket_id)
         if chunks:
             for chunk in chunks:
-                await query.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+                await screen.reply_text(chunk, parse_mode=ParseMode.HTML)
         return
 
     if action == "renewpay":
         # Формат callback: renewpay:<manual|stars>:<months>
         parts = data.split(":")
         if len(parts) != 3:
-            await query.message.reply_text("Некорректный выбор способа оплаты.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный выбор способа оплаты.", reply_markup=client_main_keyboard())
             return
         method = parts[1]
         try:
             months = int(parts[2])
         except ValueError:
-            await query.message.reply_text("Некорректный срок продления.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный срок продления.", reply_markup=client_main_keyboard())
             return
         if method not in {"balance", "stars"}:
-            await query.message.reply_text("Некорректный способ оплаты.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный способ оплаты.", reply_markup=client_main_keyboard())
             return
         if method == "stars" and (not STARS_PAYMENTS_ENABLED or STARS_PRICE_PER_MONTH <= 0):
-            await query.message.reply_text("Оплата Telegram Stars сейчас недоступна. Выберите P2P(Перевод).", reply_markup=client_main_keyboard())
+            await screen.reply_text("Оплата Telegram Stars сейчас недоступна. Выберите P2P(Перевод).", reply_markup=client_main_keyboard())
             return
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -3593,19 +3708,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Формат callback: subpay:<manual|stars>:<months>
         parts = data.split(":")
         if len(parts) != 3:
-            await query.message.reply_text("Некорректный выбор способа оплаты.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный выбор способа оплаты.", reply_markup=client_main_keyboard())
             return
         method = parts[1]
         try:
             months = int(parts[2])
         except ValueError:
-            await query.message.reply_text("Некорректный срок подписки.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный срок подписки.", reply_markup=client_main_keyboard())
             return
         if method not in {"balance", "stars"}:
-            await query.message.reply_text("Некорректный способ оплаты.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Некорректный способ оплаты.", reply_markup=client_main_keyboard())
             return
         if method == "stars" and (not STARS_PAYMENTS_ENABLED or STARS_PRICE_PER_MONTH <= 0):
-            await query.message.reply_text("Оплата Telegram Stars сейчас недоступна. Выберите P2P(Перевод).", reply_markup=client_main_keyboard())
+            await screen.reply_text("Оплата Telegram Stars сейчас недоступна. Выберите P2P(Перевод).", reply_markup=client_main_keyboard())
             return
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -3619,28 +3734,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер обращения.")
+            await screen.reply_text("Некорректный номер обращения.")
             return
 
         request = get_renewal_request(ticket_id)
         ticket = get_ticket(ticket_id)
         if not request or not ticket or int(request["telegram_user_id"]) != user.id:
-            await query.message.reply_text("Эта кнопка не относится к вашей заявке.")
+            await screen.reply_text("Эта кнопка не относится к вашей заявке.")
             return
         if str(request["status"]) == "renewed":
-            await query.message.reply_text("Эта заявка уже продлена.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Эта заявка уже продлена.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if not request["payment_details_sent_at"]:
-            await query.message.reply_text("Реквизиты по этой заявке ещё не были отправлены.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Реквизиты по этой заявке ещё не были отправлены.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if str(request["payment_method"] or "manual") == "stars":
-            await query.message.reply_text("Для этой заявки выставлен счёт Telegram Stars. Оплата подтверждается автоматически после оплаты счёта.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Для этой заявки выставлен счёт Telegram Stars. Оплата подтверждается автоматически после оплаты счёта.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if request["payment_confirmed_at"]:
-            await query.message.reply_text(
+            await screen.reply_text(
                 f"Вы уже подтвердили оплату по обращению #{ticket_id}. Техподдержка проверит платёж.",
                 reply_markup=client_main_keyboard(),
             )
@@ -3657,7 +3772,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             user_id=user.id,
         )
         await notify_admins_about_payment_done(context, ticket_id, user.id)
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Спасибо. Техподдержка получила подтверждение оплаты по обращению #{ticket_id}.",
             reply_markup=client_main_keyboard(),
         )
@@ -3668,27 +3783,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер обращения.")
+            await screen.reply_text("Некорректный номер обращения.")
             return
         request = get_subscription_request(ticket_id)
         ticket = get_ticket(ticket_id)
         if not request or not ticket or int(request["telegram_user_id"]) != user.id:
-            await query.message.reply_text("Эта кнопка не относится к вашей заявке.")
+            await screen.reply_text("Эта кнопка не относится к вашей заявке.")
             return
         if str(request["status"]) == "created":
-            await query.message.reply_text("Подписка по этой заявке уже оформлена.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Подписка по этой заявке уже оформлена.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if not request["payment_details_sent_at"]:
-            await query.message.reply_text("Реквизиты по этой заявке ещё не были отправлены.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Реквизиты по этой заявке ещё не были отправлены.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if str(request["payment_method"] or "manual") == "stars":
-            await query.message.reply_text("Для этой заявки выставлен счёт Telegram Stars. Оплата подтверждается автоматически после оплаты счёта.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Для этой заявки выставлен счёт Telegram Stars. Оплата подтверждается автоматически после оплаты счёта.", reply_markup=client_main_keyboard())
             await query.edit_message_reply_markup(reply_markup=None)
             return
         if request["payment_confirmed_at"]:
-            await query.message.reply_text(
+            await screen.reply_text(
                 f"Вы уже подтвердили оплату по обращению #{ticket_id}. Техподдержка проверит платёж.",
                 reply_markup=client_main_keyboard(),
             )
@@ -3716,7 +3831,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             except TelegramError:
                 pass
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Спасибо. Техподдержка получила подтверждение оплаты по обращению #{ticket_id}.",
             reply_markup=client_main_keyboard(),
         )
@@ -3729,47 +3844,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "adminsettings":
         if not is_super_admin(user.id):
-            await query.message.reply_text("Настройка администраторов доступна только главному администратору.")
+            await screen.reply_text("Настройка администраторов доступна только главному администратору.")
             return
         if value == "list":
-            await query.message.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
+            await screen.reply_text("👑 Администраторы и уведомления", reply_markup=admin_management_keyboard())
             return
         if value == "add":
             context.user_data["admin_waiting_new_admin"] = True
-            await query.message.reply_text(
+            await screen.reply_text(
                 "Отправьте Telegram ID нового администратора одним сообщением.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Отмена", callback_data="adminsettings:canceladd")]]),
             )
             return
         if value == "canceladd":
             context.user_data.pop("admin_waiting_new_admin", None)
-            await query.message.reply_text("Добавление администратора отменено.", reply_markup=admin_management_keyboard())
+            await screen.reply_text("Добавление администратора отменено.", reply_markup=admin_management_keyboard())
             return
         try:
             target_admin_id = int(value)
         except ValueError:
             return
         if not is_admin(target_admin_id):
-            await query.message.reply_text("Администратор не найден.", reply_markup=admin_management_keyboard())
+            await screen.reply_text("Администратор не найден.", reply_markup=admin_management_keyboard())
             return
-        await send_admin_notification_settings(query.message, target_admin_id)
+        await send_admin_notification_settings(screen, target_admin_id)
         return
 
     if action == "trialsettings":
         if not is_super_admin(user.id):
-            await query.message.reply_text("Настройка пробных подписок доступна только главному администратору.")
+            await screen.reply_text("Настройка пробных подписок доступна только главному администратору.")
             return
         if value != "toggle":
             return
         enabled = not trial_subscriptions_enabled()
         set_trial_subscriptions_enabled(enabled)
         state = "✅ включены" if enabled else "❌ отключены"
-        await query.message.reply_text(f"🎁 Пробные подписки {state}.", reply_markup=trial_settings_keyboard())
+        await screen.reply_text(f"🎁 Пробные подписки {state}.", reply_markup=trial_settings_keyboard())
         return
 
     if action == "admintoggle":
         if not is_super_admin(user.id):
-            await query.message.reply_text("Настройка уведомлений доступна только главному администратору.")
+            await screen.reply_text("Настройка уведомлений доступна только главному администратору.")
             return
         try:
             target_raw, notification_type = value.split(":", 1)
@@ -3778,27 +3893,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         settings = get_admin_notification_settings(target_admin_id)
         if notification_type not in settings or not set_admin_notification_setting(target_admin_id, notification_type, not settings[notification_type]):
-            await query.message.reply_text("Не удалось изменить настройку уведомлений.")
+            await screen.reply_text("Не удалось изменить настройку уведомлений.")
             return
-        await send_admin_notification_settings(query.message, target_admin_id)
+        await send_admin_notification_settings(screen, target_admin_id)
         return
 
     if action == "adminremove":
         if not is_super_admin(user.id):
-            await query.message.reply_text("Удалять администраторов может только главный администратор.")
+            await screen.reply_text("Удалять администраторов может только главный администратор.")
             return
         try:
             target_admin_id = int(value)
         except ValueError:
             return
         if not remove_admin(target_admin_id):
-            await query.message.reply_text("Нельзя удалить главного администратора или администратор уже удалён.")
+            await screen.reply_text("Нельзя удалить главного администратора или администратор уже удалён.")
             return
-        await query.message.reply_text(f"Администратор {target_admin_id} удалён.", reply_markup=admin_management_keyboard())
+        await screen.reply_text(f"Администратор {target_admin_id} удалён.", reply_markup=admin_management_keyboard())
         return
 
     if action in {"userlink", "userdetail", "userban", "userbalance", "userref", "userprice", "userlogs", "userrenew", "userrenewmanual", "userrenewrequest", "userrenewrequestticket", "userdelete", "userdeletecancel"} and not is_admin(user.id):
-        await query.message.reply_text("Это действие доступно только администраторам.")
+        await screen.reply_text("Это действие доступно только администраторам.")
         return
 
     if action == "userlogs":
@@ -3808,19 +3923,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         email = get_xui_link(target_user_id)
         if not email:
-            await query.message.reply_text("У пользователя нет привязанного email 3x-ui.")
+            await screen.reply_text("У пользователя нет привязанного email 3x-ui.")
             return
         try:
             async with XuiClient() as api:
                 lines = await api.get_xray_log_lines()
         except XuiApiError as exc:
-            await query.message.reply_text(f"Не удалось получить Xray-логи: {exc}")
+            await screen.reply_text(f"Не удалось получить Xray-логи: {exc}")
             return
 
         email_key = email.casefold()
         matched = [line for line in lines if email_key in line.casefold()]
         if not matched:
-            await query.message.reply_text(
+            await screen.reply_text(
                 f"В последних {len(lines)} строках Xray-лога основной панели нет записей клиента <code>{html.escape(email)}</code>.\n\n"
                 "Это возможно, если клиент подключался давно, access-log не содержит email или использовал удалённую ноду.",
                 parse_mode=ParseMode.HTML,
@@ -3829,7 +3944,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log_text = await format_client_xray_logs(matched)
         if len(log_text) > 3300:
             log_text = log_text[-3300:]
-        await query.message.reply_text(
+        await screen.reply_text(
             f"📥 Xray-лог клиента <code>{html.escape(email)}</code> — основная панель\n"
             "Показаны IP клиента, адрес назначения и имя сервиса, если reverse DNS смог его определить.\n\n"
             f"<pre>{html.escape(log_text)}</pre>\n\n"
@@ -3844,9 +3959,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except ValueError:
             return
         if not get_user(target_user_id):
-            await query.message.reply_text("Пользователь не найден.")
+            await screen.reply_text("Пользователь не найден.")
             return
-        await query.message.reply_text(
+        await screen.reply_text(
             "Как продлить подписку?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📋 Продлить по заявке", callback_data=f"userrenewrequest:{target_user_id}")],
@@ -3861,10 +3976,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except ValueError:
             return
         if not get_user(target_user_id):
-            await query.message.reply_text("Пользователь не найден.")
+            await screen.reply_text("Пользователь не найден.")
             return
         context.user_data["admin_waiting_direct_renew_user_id"] = target_user_id
-        await query.message.reply_text("Введите количество дней для продления. Это продление не будет связано с заявкой.", reply_markup=admin_main_keyboard())
+        await screen.reply_text("Введите количество дней для продления. Это продление не будет связано с заявкой.", reply_markup=admin_main_keyboard())
         return
 
     if action == "userrenewrequest":
@@ -3884,13 +3999,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 (target_user_id,),
             ).fetchall()
         if not rows:
-            await query.message.reply_text("У пользователя нет незавершённых заявок на продление. Выберите «Продлить без заявки».")
+            await screen.reply_text("У пользователя нет незавершённых заявок на продление. Выберите «Продлить без заявки».")
             return
         buttons = [
             [InlineKeyboardButton(f"Заявка #{row['ticket_id']} · {row['days']} дн. · {row['status']}", callback_data=f"userrenewrequestticket:{target_user_id}:{row['ticket_id']}")]
             for row in rows
         ]
-        await query.message.reply_text("Выберите заявку для продления:", reply_markup=InlineKeyboardMarkup(buttons))
+        await screen.reply_text("Выберите заявку для продления:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if action == "userrenewrequestticket":
@@ -3901,9 +4016,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         request = get_renewal_request(ticket_id)
         if not request or int(request["telegram_user_id"]) != target_user_id:
-            await query.message.reply_text("Заявка не найдена или не принадлежит этому пользователю.")
+            await screen.reply_text("Заявка не найдена или не принадлежит этому пользователю.")
             return
-        await ask_admin_for_renewal_input(query.message, context, ticket_id, bind_email_to_user=True)
+        await ask_admin_for_renewal_input(screen, context, ticket_id, bind_email_to_user=True)
         return
 
     if action == "userdelete":
@@ -3912,10 +4027,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except ValueError:
             return
         if not get_user(target_user_id) or is_admin(target_user_id):
-            await query.message.reply_text("Нельзя удалить администратора или несуществующего пользователя.")
+            await screen.reply_text("Нельзя удалить администратора или несуществующего пользователя.")
             return
         context.user_data["admin_waiting_delete_user_id"] = target_user_id
-        await query.message.reply_text(
+        await screen.reply_text(
             f"⚠️ Удалить пользователя {target_user_id} и все его локальные данные бота? Подписка в 3x-ui останется.\n\nОтправьте <code>yes</code> для подтверждения.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data=f"userdeletecancel:{target_user_id}")]]),
@@ -3929,7 +4044,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         if context.user_data.get("admin_waiting_delete_user_id") == target_user_id:
             context.user_data.pop("admin_waiting_delete_user_id", None)
-        await query.message.reply_text("Удаление отменено.", reply_markup=admin_main_keyboard())
+        await screen.reply_text("Удаление отменено.", reply_markup=admin_main_keyboard())
         return
 
     if action == "userlink":
@@ -3938,10 +4053,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except ValueError:
             return
         if not get_user(target_user_id):
-            await query.message.reply_text("Пользователь не найден.")
+            await screen.reply_text("Пользователь не найден.")
             return
         context.user_data["admin_linking_xui_email_user_id"] = target_user_id
-        await query.message.reply_text(f"Введите email клиента 3x-ui для пользователя {target_user_id}. Бот проверит его и запишет tgId в панель.", reply_markup=admin_main_keyboard())
+        await screen.reply_text(f"Введите email клиента 3x-ui для пользователя {target_user_id}. Бот проверит его и запишет tgId в панель.", reply_markup=admin_main_keyboard())
         return
 
     if action == "userdetail":
@@ -3951,7 +4066,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         target = get_user(target_user_id)
         if not target:
-            await query.message.reply_text("Пользователь не найден.")
+            await screen.reply_text("Пользователь не найден.")
             return
         count, earned = referral_stats(target_user_id)
         with db() as conn:
@@ -4006,7 +4121,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             buttons.append([InlineKeyboardButton(action_label, callback_data=f"userban:{target_user_id}")])
             buttons.append([InlineKeyboardButton("🗑 Удалить пользователя", callback_data=f"userdelete:{target_user_id}")])
         keyboard = InlineKeyboardMarkup(buttons)
-        await query.message.reply_text(text, reply_markup=keyboard)
+        await screen.reply_text(text, reply_markup=keyboard)
         return
 
     if action == "userban":
@@ -4016,14 +4131,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         target = get_user(target_user_id)
         if not target:
-            await query.message.reply_text("Пользователь не найден.")
+            await screen.reply_text("Пользователь не найден.")
             return
         if is_admin(target_user_id):
-            await query.message.reply_text("Нельзя блокировать администратора через карточку пользователя.")
+            await screen.reply_text("Нельзя блокировать администратора через карточку пользователя.")
             return
         new_ban_state = not bool(target["is_banned"])
         set_ban(target_user_id, new_ban_state)
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Пользователь {target_user_id} {'заблокирован' if new_ban_state else 'разблокирован'}.",
             reply_markup=admin_main_keyboard(),
         )
@@ -4031,7 +4146,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "topupshow":
         if not is_admin(user.id):
-            await query.message.reply_text("Просмотр пополнений доступен только администраторам.")
+            await screen.reply_text("Просмотр пополнений доступен только администраторам.")
             return
         try:
             topup_id = int(value)
@@ -4039,7 +4154,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         topup = get_balance_topup(topup_id)
         if not topup:
-            await query.message.reply_text("Заявка не найдена.")
+            await screen.reply_text("Заявка не найдена.")
             return
         status_text = {"pending": "🕐 ожидает проверки", "confirmed": "✅ зачислено", "cancelled": "❌ отменено"}.get(str(topup["status"]), str(topup["status"]))
         client_profile = f'<a href="tg://user?id={topup["user_id"]}">Открыть профиль клиента</a> · <code>{topup["user_id"]}</code>'
@@ -4056,7 +4171,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:
                 admin_profile = "автоматически"
             details += f"\nОбработано: {topup['confirmed_at']} · администратор: {admin_profile}"
-        await query.message.reply_text(
+        await screen.reply_text(
             details,
             parse_mode=ParseMode.HTML,
             reply_markup=balance_topup_confirm_keyboard(topup_id) if str(topup["status"]) == "pending" else None,
@@ -4076,89 +4191,89 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Введите цену за месяц в рублях. Отправьте 0, чтобы вернуть общую цену из .env." if action == "userprice" else
             "Введите ID пригласившего или 0, чтобы удалить привязку."
         )
-        await query.message.reply_text(prompt, reply_markup=admin_main_keyboard())
+        await screen.reply_text(prompt, reply_markup=admin_main_keyboard())
         return
 
     if action == "tickets":
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         rows, page, pages = list_open_tickets(page)
         total = count_open_tickets()
         text, keyboard = format_tickets_list_page(rows, page, pages, total)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "history":
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         rows, page, pages, total = list_all_tickets(page)
         text, keyboard = format_ticket_history_page(rows, page, pages, total)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "historyticket":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID обращения.")
+            await screen.reply_text("Некорректный ID обращения.")
             return
         chunks = build_ticket_full_chat_chunks(ticket_id)
         if not chunks:
-            await query.message.reply_text("Обращение не найдено.")
+            await screen.reply_text("Обращение не найдено.")
             return
-        await query.edit_message_text(chunks[0], parse_mode=ParseMode.HTML)
+        await screen.edit_text(chunks[0], parse_mode=ParseMode.HTML)
         for chunk in chunks[1:]:
-            await query.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            await screen.reply_text(chunk, parse_mode=ParseMode.HTML)
 
     elif action == "ticket":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID обращения.")
+            await screen.reply_text("Некорректный ID обращения.")
             return
         detail = build_ticket_detail(ticket_id)
         if not detail:
-            await query.message.reply_text("Обращение не найдено.")
+            await screen.reply_text("Обращение не найдено.")
             return
         text, keyboard = detail
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "renewals":
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         rows, page, pages, total = list_renewal_requests(page)
         text, keyboard = format_renewal_requests_page(rows, page, pages, total)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "subscriptions":
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         rows, page, pages, total = list_subscription_requests(page)
         text, keyboard = format_subscription_requests_page(rows, page, pages, total)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "subevent":
         try:
             source, record_id_raw, page_raw = value.split(":", 2)
             record_id, page = int(record_id_raw), int(page_raw)
         except ValueError:
-            await query.message.reply_text("Некорректная операция.")
+            await screen.reply_text("Некорректная операция.")
             return
         text = get_subscription_event_detail(source, record_id)
         if not text:
-            await query.message.reply_text("Операция не найдена.")
+            await screen.reply_text("Операция не найдена.")
             return
-        await query.edit_message_text(
+        await screen.edit_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К списку", callback_data=f"subevents:{page}")]]),
@@ -4168,81 +4283,81 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         rows, page, pages, total = list_subscription_events(page)
         text, keyboard = format_subscription_events_page(rows, page, pages, total)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "submsgrecord":
         clear_subscription_welcome_messages()
         context.user_data["admin_recording_subscription_messages"] = True
-        await query.message.reply_text(
+        await screen.reply_text(
             "Режим записи сообщений для новых клиентов включён.\n\n"
             "Отправьте в бот нужные сообщения по порядку. После завершения напишите /done. Для отмены — /cancel.",
             reply_markup=admin_main_keyboard(),
         )
 
     elif action == "submsgpreview":
-        await preview_subscription_messages(query.message, context)
+        await preview_subscription_messages(screen, context)
 
     elif action == "submsgclear":
         deleted = clear_subscription_welcome_messages()
         context.user_data.pop("admin_recording_subscription_messages", None)
-        await query.message.reply_text(f"Удалено сообщений: {deleted}.", reply_markup=admin_main_keyboard())
+        await screen.reply_text(f"Удалено сообщений: {deleted}.", reply_markup=admin_main_keyboard())
 
     elif action == "renewsel":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_renewal_request(ticket_id)
         if request and not request["payment_details_sent_at"]:
-            await query.message.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
+            await screen.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
             return
         if request and str(request["payment_method"] or "manual") == "stars" and not request["payment_confirmed_at"]:
-            await query.message.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
+            await screen.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
             return
-        await ask_admin_for_renewal_input(query.message, context, ticket_id, bind_email_to_user=True)
+        await ask_admin_for_renewal_input(screen, context, ticket_id, bind_email_to_user=True)
 
     elif action == "renewnolink":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_renewal_request(ticket_id)
         if request and not request["payment_details_sent_at"]:
-            await query.message.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
+            await screen.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
             return
         if request and str(request["payment_method"] or "manual") == "stars" and not request["payment_confirmed_at"]:
-            await query.message.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
+            await screen.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
             return
-        await ask_admin_for_renewal_input(query.message, context, ticket_id, bind_email_to_user=False)
+        await ask_admin_for_renewal_input(screen, context, ticket_id, bind_email_to_user=False)
 
     elif action == "paydetails":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_renewal_request(ticket_id)
         if not request:
-            await query.message.reply_text("Заявка на продление не найдена.")
+            await screen.reply_text("Заявка на продление не найдена.")
             return
         if str(request["status"]) == "renewed":
-            await query.message.reply_text("Эта заявка уже продлена.")
+            await screen.reply_text("Эта заявка уже продлена.")
             return
         if request["payment_details_sent_at"]:
-            await query.message.reply_text(
+            await screen.reply_text(
                 "Реквизиты по этой заявке уже отправлены. Теперь можно продлить подписку после проверки оплаты.",
                 reply_markup=renewal_ticket_keyboard(ticket_id, int(request["telegram_user_id"])),
             )
             return
         context.user_data["reply_to_ticket_id"] = ticket_id
         context.user_data["admin_sending_payment_details_ticket_id"] = ticket_id
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Отправьте реквизиты и сумму для обращения #{ticket_id}.\n"
             "Это сообщение уйдёт клиенту с кнопкой «✅ Платёж выполнен».\n"
             "Для отмены используйте /cancel."
@@ -4252,23 +4367,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         if not STARS_PAYMENTS_ENABLED:
-            await query.message.reply_text("Оплата Telegram Stars отключена в .env.")
+            await screen.reply_text("Оплата Telegram Stars отключена в .env.")
             return
         request = get_renewal_request(ticket_id)
         if not request:
-            await query.message.reply_text("Заявка на продление не найдена.")
+            await screen.reply_text("Заявка на продление не найдена.")
             return
         if str(request["status"]) == "renewed":
-            await query.message.reply_text("Эта заявка уже продлена.")
+            await screen.reply_text("Эта заявка уже продлена.")
             return
         if request["payment_details_sent_at"]:
-            await query.message.reply_text("По этой заявке уже отправлен способ оплаты.")
+            await screen.reply_text("По этой заявке уже отправлен способ оплаты.")
             return
         context.user_data["admin_waiting_stars_invoice_ticket_id"] = ticket_id
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Введите сумму счёта в Telegram Stars для обращения #{ticket_id}.\n"
             f"Срок заявки: {request['days']} дн. ({month_word(int(request['months']))}).\n"
             "Например: 250\n\nДля отмены используйте /cancel.",
@@ -4279,7 +4394,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         await reject_renewal_ticket(context, ticket_id, user.id, query.message)
 
@@ -4287,24 +4402,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_subscription_request(ticket_id)
         if not request:
-            await query.message.reply_text("Заявка на оформление не найдена.")
+            await screen.reply_text("Заявка на оформление не найдена.")
             return
         if str(request["status"]) == "created":
-            await query.message.reply_text("Клиент по этой заявке уже создан.")
+            await screen.reply_text("Клиент по этой заявке уже создан.")
             return
         if request["payment_details_sent_at"]:
-            await query.message.reply_text(
+            await screen.reply_text(
                 "Реквизиты по этой заявке уже отправлены. Теперь можно создать клиента после проверки оплаты.",
                 reply_markup=subscription_ticket_keyboard(ticket_id, int(request["telegram_user_id"])),
             )
             return
         context.user_data["reply_to_ticket_id"] = ticket_id
         context.user_data["admin_sending_subscription_payment_details_ticket_id"] = ticket_id
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Отправьте реквизиты и сумму для оформления подписки по обращению #{ticket_id}.\n"
             "Это сообщение уйдёт клиенту с кнопкой «✅ Платёж выполнен».\n"
             "Для отмены используйте /cancel."
@@ -4314,21 +4429,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_subscription_request(ticket_id)
         if not request:
-            await query.message.reply_text("Заявка на оформление не найдена.")
+            await screen.reply_text("Заявка на оформление не найдена.")
             return
         if str(request["status"]) == "created":
-            await query.message.reply_text("Клиент по этой заявке уже создан.")
+            await screen.reply_text("Клиент по этой заявке уже создан.")
             return
         if request["payment_details_sent_at"]:
-            await query.message.reply_text("По этой заявке уже отправлен способ оплаты.")
+            await screen.reply_text("По этой заявке уже отправлен способ оплаты.")
             return
         amount = renewal_stars_amount_for_months(int(request["months"]))
         ok = await send_subscription_stars_invoice_to_client(context, ticket_id, int(request["telegram_user_id"]), amount, sent_by_admin_id=user.id)
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Счёт Telegram Stars на {amount} ⭐ отправлен клиенту." if ok else "Не удалось отправить счёт Telegram Stars.",
             reply_markup=subscription_ticket_keyboard(ticket_id, int(request["telegram_user_id"])),
         )
@@ -4337,7 +4452,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         await finalize_subscription_ticket(update, context, ticket_id)
 
@@ -4345,33 +4460,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_subscription_request(ticket_id)
         if request and not request["payment_details_sent_at"]:
-            await query.message.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
+            await screen.reply_text("Сначала отправьте клиенту реквизиты или выставьте счёт Telegram Stars.")
             return
         if request and str(request["payment_method"] or "manual") == "stars" and not request["payment_confirmed_at"]:
-            await query.message.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
+            await screen.reply_text("Сначала дождитесь успешной оплаты Telegram Stars.")
             return
-        await ask_admin_for_subscription_input(query.message, context, ticket_id)
+        await ask_admin_for_subscription_input(screen, context, ticket_id)
 
     elif action == "rejectsub":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID заявки.")
+            await screen.reply_text("Некорректный ID заявки.")
             return
         request = get_subscription_request(ticket_id)
         ticket = get_ticket(ticket_id)
         if not request or not ticket:
-            await query.message.reply_text("Заявка на оформление не найдена.")
+            await screen.reply_text("Заявка на оформление не найдена.")
             return
         if str(request["status"]) in {"created", "rejected"}:
-            await query.message.reply_text("Эта заявка уже обработана.")
+            await screen.reply_text("Эта заявка уже обработана.")
             return
         if str(request["payment_method"] or "manual") == "stars" and request["payment_confirmed_at"]:
-            await query.message.reply_text(
+            await screen.reply_text(
                 "Оплата Telegram Stars уже подтверждена, поэтому отклонять заявку нельзя. "
                 "Если автоматическое оформление не сработало, используйте кнопку «Создать клиента»."
             )
@@ -4397,38 +4512,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         except TelegramError:
             pass
-        await query.message.reply_text("Заявка на оформление отклонена и обращение закрыто.", reply_markup=admin_main_keyboard())
+        await screen.reply_text("Заявка на оформление отклонена и обращение закрыто.", reply_markup=admin_main_keyboard())
 
     elif action == "clients":
         try:
             page = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный номер страницы.")
+            await screen.reply_text("Некорректный номер страницы.")
             return
         try:
             async with XuiClient() as api:
                 clients = await api.list_clients()
         except XuiApiError as exc:
-            await query.message.reply_text(f"Ошибка 3x-ui: {exc}")
+            await screen.reply_text(f"Ошибка 3x-ui: {exc}")
             return
         if not clients:
-            await query.message.reply_text("В 3x-ui не найдено клиентов.")
+            await screen.reply_text("В 3x-ui не найдено клиентов.")
             return
         text, keyboard = format_xui_clients_page(clients, page)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await screen.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     elif action == "reply":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID обращения.")
+            await screen.reply_text("Некорректный ID обращения.")
             return
         if not get_ticket(ticket_id):
-            await query.message.reply_text("Обращение не найдено.")
+            await screen.reply_text("Обращение не найдено.")
             return
         context.user_data["reply_to_ticket_id"] = ticket_id
         context.user_data.pop("admin_sending_payment_details_ticket_id", None)
-        await query.message.reply_text(
+        await screen.reply_text(
             f"Введите ответ для обращения #{ticket_id}. Можно отправить текст, фото, документ или другое сообщение.\n"
             "Для отмены используйте /cancel."
         )
@@ -4437,11 +4552,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID обращения.")
+            await screen.reply_text("Некорректный ID обращения.")
             return
         ticket = get_ticket(ticket_id)
         if not ticket:
-            await query.message.reply_text("Обращение не найдено.")
+            await screen.reply_text("Обращение не найдено.")
             return
         changed = close_ticket(ticket_id)
         if changed:
@@ -4452,22 +4567,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             except TelegramError:
                 pass
-        await query.message.reply_text("Обращение закрыто." if changed else "Обращение уже было закрыто.")
+        await screen.reply_text("Обращение закрыто." if changed else "Обращение уже было закрыто.")
 
     elif action == "ban":
         try:
             user_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный USER_ID.")
+            await screen.reply_text("Некорректный USER_ID.")
             return
         set_ban(user_id, True)
-        await query.message.reply_text(f"Пользователь {user_id} заблокирован.")
+        await screen.reply_text(f"Пользователь {user_id} заблокирован.")
 
     elif action == "renewticket":
         try:
             ticket_id = int(value)
         except ValueError:
-            await query.message.reply_text("Некорректный ID обращения.")
+            await screen.reply_text("Некорректный ID обращения.")
             return
         # Для кнопки используем сохранённый срок из заявки.
         fake_update = update
@@ -4640,6 +4755,7 @@ def build_app() -> Application:
 
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
+    application.add_handler(MessageHandler(filters.COMMAND, discard_input_on_command), group=-1)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("id", id_command))

@@ -707,18 +707,18 @@ def build_subscription_link(result: dict[str, Any]) -> Optional[str]:
         return None
 
 
-async def send_subscription_welcome_messages(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int:
+async def send_subscription_welcome_messages(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[int]:
     """Скопировать клиенту заранее сохранённые админом сообщения после создания подписки."""
     rows = list_subscription_welcome_messages()
-    sent = 0
+    sent = []
     for row in rows:
         try:
-            await context.bot.copy_message(
+            copied = await context.bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=int(row["source_chat_id"]),
                 message_id=int(row["source_message_id"]),
             )
-            sent += 1
+            sent.append(copied.message_id)
         except TelegramError as exc:
             logger.warning(
                 "Не удалось отправить приветственное сообщение подписки #%s пользователю %s: %s",
