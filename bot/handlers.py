@@ -1,9 +1,60 @@
+from collections.abc import Awaitable
+from weakref import WeakValueDictionary
+
 from telegram.error import BadRequest
+from telegram.ext import BaseUpdateProcessor
 
 from .config import *
 from .database import *
 from .xui import *
 from .tickets import *
+
+
+class ChatUpdateProcessor(BaseUpdateProcessor):
+    """Allow client navigation during slow requests while serializing other actions."""
+
+    def __init__(self) -> None:
+        super().__init__(32)
+        self.chat_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+        self.action_lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+    async def do_process_update(self, update: object, coroutine: Awaitable[Any]) -> None:
+        chat = update.effective_chat if isinstance(update, Update) else None
+        user = update.effective_user if isinstance(update, Update) else None
+        chat_id = chat.id if chat else user.id if user else 0
+        # Keep an active reference to the lock until all work for this chat has finished.
+        chat_lock = self.chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with chat_lock:
+            if isinstance(update, Update) and self.is_client_navigation(update):
+                await coroutine
+            else:
+                # Payment and admin handlers can affect other chats and share records.
+                async with self.action_lock:
+                    await coroutine
+
+    @staticmethod
+    def is_client_navigation(update: Update) -> bool:
+        user = update.effective_user
+        if not user:
+            return False
+        message = update.message
+        query = update.callback_query
+        text = message.text.strip() if message and message.text else None
+        callback = query.data if query else None
+        navigation = text in {
+            CLIENT_BUTTON_BALANCE,
+            CLIENT_BUTTON_REFERRALS,
+            CLIENT_BUTTON_TICKET,
+            CLIENT_BUTTON_CONNECTION_GUIDE,
+            "🆘 Обращение",
+        } or callback in {"balance:p2p", "balance:crypto", "subscription:renew", "clientticket:new"}
+        return navigation and not is_admin(user.id)
 
 
 class MenuScreen:
@@ -77,7 +128,7 @@ class MenuScreen:
         if isinstance(markup, ReplyKeyboardMarkup):
             replaced_keyboard_id = chat_data.get("menu_keyboard_id")
             chat_data["menu_keyboard_id"] = sent.message_id
-        chat_data["menu_editable_id"] = sent.message_id if isinstance(markup, InlineKeyboardMarkup) else None
+        chat_data["menu_editable_id"] = sent.message_id if markup is None or isinstance(markup, InlineKeyboardMarkup) else None
         await self.track(sent.message_id, replaced_keyboard_id)
 
     async def edit_text(self, *args, **kwargs) -> None:
@@ -85,21 +136,25 @@ class MenuScreen:
         if self.message.message_id in self.message_ids:
             await self.track(self.message.message_id)
 
-    async def remove_menu_press(self) -> None:
+    def remove_menu_press(self) -> None:
         if self.message.chat.type == "private":
-            try:
-                await self.message.delete()
-            except TelegramError:
-                pass
+            # Rendering the screen need not wait for a separate Telegram request.
+            self.context.application.create_task(self.delete_menu_press(), update=self.update)
+
+    async def delete_menu_press(self) -> None:
+        try:
+            await self.message.delete()
+        except TelegramError:
+            pass
 
 
-def discard_ticket_and_broadcast_input(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for key in ("client_waiting_ticket_text", "admin_broadcast_mode"):
+def discard_draft_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in ("client_waiting_ticket_text", "admin_broadcast_mode", "balance_topup_method"):
         context.user_data.pop(key, None)
 
 
 async def discard_input_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    discard_ticket_and_broadcast_input(context)
+    discard_draft_input(context)
 
 
 def cancel_input_keyboard(update_id: int) -> InlineKeyboardMarkup:
@@ -1213,6 +1268,18 @@ async def ask_client_renewal_months(screen: MenuScreen, user_id: int) -> None:
     screen.context.user_data["client_waiting_renew_months"] = True
 
 
+async def show_client_balance(screen: MenuScreen, user_id: int) -> None:
+    topup_note = "Пополнение P2P проверяет администратор."
+    if CRYPTO_TOPUP_ENABLED:
+        topup_note = "Пополнение P2P и криптовалютой проверяет администратор."
+    await screen.reply_text(
+        f"💰 Ваш баланс: <b>{balance_of(user_id)} ₽</b>\n\n"
+        f"{topup_note} После зачисления выберите срок подписки и оплатите её с баланса.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=balance_keyboard(),
+    )
+
+
 async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     screen = MenuScreen(update, context)
     user = update.effective_user
@@ -1229,30 +1296,21 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         CLIENT_BUTTON_CONNECTION_GUIDE, CLIENT_BUTTON_SUBSCRIPTION,
     }:
         clear_pending_input(context)
-        await screen.remove_menu_press()
+        screen.remove_menu_press()
 
     if text == CLIENT_BUTTON_BALANCE:
-        topup_note = "Пополнение P2P проверяет администратор."
-        if CRYPTO_TOPUP_ENABLED:
-            topup_note = "Пополнение P2P и криптовалютой проверяет администратор."
-        await screen.reply_text(
-            f"💰 Ваш баланс: <b>{balance_of(user.id)} ₽</b>\n\n"
-            f"{topup_note} После зачисления выберите срок подписки и оплатите её с баланса.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=balance_keyboard(),
-        )
+        await show_client_balance(screen, user.id)
         return True
 
     if text == CLIENT_BUTTON_REFERRALS:
         count, earned = referral_stats(user.id)
-        bot_username = (await context.bot.get_me()).username
+        bot_username = context.bot.username
         link = f"https://t.me/{bot_username}?start=ref_{user.id}" if bot_username else f"ref_{user.id}"
         await screen.reply_text(
             f"👥 Реферальная программа\n\nВаша ссылка:\n<code>{html.escape(link)}</code>\n\n"
             f"Рефералов: <b>{count}</b>\nЗаработано: <b>{earned} ₽</b>\n\n"
             f"Вы получаете {REFERRAL_PERCENT}% с каждого подтверждённого пополнения реферала. Вознаграждение автоматически поступает на баланс.",
             parse_mode=ParseMode.HTML,
-            reply_markup=client_main_keyboard(),
         )
         return True
 
@@ -1315,26 +1373,32 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         except ValueError:
             amount = 0
         if amount < BALANCE_MIN_TOPUP_RUB or amount > BALANCE_MAX_TOPUP_RUB:
-            await screen.reply_text(f"Введите целую сумму от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB} ₽.")
+            await screen.reply_text(
+                f"Введите целую сумму от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB} ₽.",
+                reply_markup=cancel_input_keyboard(update.update_id),
+            )
             return True
         method = str(context.user_data.pop("balance_topup_method"))
         topup_id = create_balance_topup(user.id, amount, method)
         method_label = "криптовалютой" if method == "crypto" else "P2P"
-        if method in {"p2p", "crypto"}:
-            for admin_id in get_admin_ids_for_notification("payments"):
-                try:
-                    await context.bot.send_message(
-                        chat_id=admin_id,
-                        text=f"💳 Новая заявка на пополнение {method_label} #{topup_id}: пользователь {user.id}, сумма {amount} ₽. Сначала отправьте реквизиты кнопкой ниже; после поступления перевода подтвердите зачисление.",
-                        reply_markup=balance_topup_confirm_keyboard(topup_id),
-                    )
-                except TelegramError:
-                    pass
-        await screen.reply_text(
-            f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n"
-            "Дождитесь реквизитов от администратора. После перевода появится кнопка подтверждения.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=None,
+
+        async def notify_admin(admin_id: int) -> None:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"💳 Новая заявка на пополнение {method_label} #{topup_id}: пользователь {user.id}, сумма {amount} ₽. Сначала отправьте реквизиты кнопкой ниже; после поступления перевода подтвердите зачисление.",
+                    reply_markup=balance_topup_confirm_keyboard(topup_id),
+                )
+            except TelegramError:
+                pass
+
+        await asyncio.gather(
+            screen.reply_text(
+                f"Заявка на пополнение #{topup_id}: <b>{amount} ₽</b>.\n\n"
+                "Дождитесь реквизитов от администратора. После перевода появится кнопка подтверждения.",
+                parse_mode=ParseMode.HTML,
+            ),
+            *(notify_admin(admin_id) for admin_id in get_admin_ids_for_notification("payments")),
         )
         return True
 
@@ -1925,7 +1989,7 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         return False
 
     clear_pending_input(context)
-    await screen.remove_menu_press()
+    screen.remove_menu_press()
 
     if text in sections:
         title, section = sections[text]
@@ -3562,9 +3626,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif context.user_data.get("client_renew_months"):
             clear_pending_input(context)
             await ask_client_renewal_months(screen, user.id)
+        elif context.user_data.get("balance_topup_method"):
+            clear_pending_input(context)
+            await show_client_balance(screen, user.id)
         return
 
-    discard_ticket_and_broadcast_input(context)
+    discard_draft_input(context)
     if action != "renewpay":
         context.user_data.pop("client_waiting_renew_months", None)
         context.user_data.pop("client_renew_months", None)
@@ -3575,12 +3642,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if value == "crypto" and not CRYPTO_TOPUP_ENABLED:
             await screen.reply_text("Криптопополнение сейчас отключено.")
             return
-        context.user_data["balance_topup_method"] = value
+        clear_pending_input(context)
         await screen.reply_text(
             f"Введите сумму пополнения в ₽ (от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB}).\n"
             "Эта сумма будет зачислена на внутренний баланс после оплаты/подтверждения.",
-            reply_markup=client_main_keyboard(),
+            reply_markup=cancel_input_keyboard(update.update_id),
         )
+        context.user_data["balance_topup_method"] = value
         return
 
     if action == "topupsmenu":
@@ -4812,7 +4880,7 @@ def build_app() -> Application:
     if not get_admin_ids():
         raise RuntimeError("Не указан ни один администратор. Заполните ADMIN_IDS в .env")
 
-    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(ChatUpdateProcessor()).post_init(post_init).build()
 
     application.add_handler(MessageHandler(filters.COMMAND, discard_input_on_command), group=-1)
     application.add_handler(CommandHandler("start", start))

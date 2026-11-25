@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import unittest
 from contextlib import ExitStack
@@ -35,7 +36,9 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             args=[],
             user_data={},
             chat_data={},
+            application=SimpleNamespace(create_task=lambda coroutine, **_: asyncio.create_task(coroutine)),
             bot=SimpleNamespace(
+                username="shop_test_bot",
                 delete_message=AsyncMock(),
                 edit_message_reply_markup=AsyncMock(),
                 edit_message_text=AsyncMock(side_effect=self.edit_reply),
@@ -134,7 +137,9 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await self.click(2, "balance:p2p")
         self.assertNotIn("client_waiting_ticket_text", self.context.user_data)
         self.assertEqual(self.context.user_data["balance_topup_method"], "p2p")
-        self.context.bot.delete_message.assert_any_await(2, prompt)
+        edit = self.context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edit["message_id"], prompt)
+        self.assertIn("Введите сумму пополнения", edit["text"])
         self.notify.assert_not_awaited()
 
     async def test_navigation_removes_old_buttons_if_delete_fails(self):
@@ -230,3 +235,81 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
 
         pay.assert_awaited_once()
         self.assertEqual(pay.await_args.args[2:], (3, "balance"))
+
+    async def test_cancel_topup_returns_to_balance_after_invalid_amount(self):
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        await self.click(2, "balance:p2p")
+        old_cancel = self.cancel_button_data()
+        await self.press(2, "не сумма")
+        await self.click(2, old_cancel)
+        self.assertEqual(self.context.user_data["balance_topup_method"], "p2p")
+        await self.click(2, self.cancel_button_data())
+        self.assertNotIn("balance_topup_method", self.context.user_data)
+        self.assertIn("Ваш баланс", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][0].callback_data, "balance:p2p")
+        with database.db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM balance_topups").fetchone()[0], 0)
+
+    async def test_referrals_screen_is_replaced_without_removing_main_keyboard(self):
+        await handlers.start(Update(1, message=self.message(2, text="/start")), self.context)
+        keyboard_id = self.context.chat_data["menu_keyboard_id"]
+        await self.press(2, handlers.CLIENT_BUTTON_REFERRALS)
+        referral_id = self.context.chat_data["menu_screen_ids"][0]
+        self.assertNotEqual(keyboard_id, referral_id)
+        self.assertIsNone(self.last_reply_markup)
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        self.assertEqual(self.context.chat_data["menu_screen_ids"], [referral_id])
+        self.assertEqual(self.context.chat_data["menu_keyboard_id"], keyboard_id)
+        self.assertIn("Ваш баланс", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.context.bot.delete_message.assert_not_awaited()
+
+    async def test_topup_confirmation_is_shown_while_admin_notification_is_pending(self):
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        await self.click(2, "balance:p2p")
+        notification_started = asyncio.Event()
+        finish_notification = asyncio.Event()
+
+        async def notify_admin(**kwargs):
+            notification_started.set()
+            await finish_notification.wait()
+
+        self.context.bot.send_message = AsyncMock(side_effect=notify_admin)
+        with patch.object(handlers, "get_admin_ids_for_notification", return_value=[1]):
+            submit = asyncio.create_task(self.press(2, str(handlers.BALANCE_MIN_TOPUP_RUB)))
+            try:
+                await asyncio.wait_for(notification_started.wait(), 1)
+                self.assertIn("Заявка на пополнение #", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            finally:
+                finish_notification.set()
+                await submit
+
+        with database.db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM balance_topups").fetchone()[0], 1)
+
+    async def test_slow_action_does_not_block_navigation_in_another_chat(self):
+        processor = handlers.ChatUpdateProcessor()
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        same_chat_ran = asyncio.Event()
+
+        async def slow_action():
+            started.set()
+            await finish.wait()
+
+        async def navigate_same_chat():
+            same_chat_ran.set()
+
+        slow_update = Update(1, message=self.message(2, text="подтверждение"))
+        same_chat = Update(2, message=self.message(2, text=handlers.CLIENT_BUTTON_BALANCE))
+        other_chat = Update(3, message=self.message(3, text=handlers.CLIENT_BUTTON_BALANCE, message_id=3))
+        slow = asyncio.create_task(processor.process_update(slow_update, slow_action()))
+        await started.wait()
+        queued = asyncio.create_task(processor.process_update(same_chat, navigate_same_chat()))
+        try:
+            await asyncio.wait_for(processor.process_update(other_chat, handlers.route_message(other_chat, self.context)), 1)
+            self.assertIn("Ваш баланс", self.reply_text.await_args.args[0])
+            self.assertFalse(same_chat_ran.is_set())
+        finally:
+            finish.set()
+            await asyncio.gather(slow, queued)
+        self.assertTrue(same_chat_ran.is_set())
