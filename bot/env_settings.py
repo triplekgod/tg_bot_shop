@@ -39,6 +39,7 @@ OPTIONAL_ENV_KEYS = {
     "XUI_BASE_URL", "XUI_PUBLIC_SUBSCRIPTION_BASE_URL", "XUI_API_TOKEN", "XUI_USERNAME", "XUI_PASSWORD",
     "XUI_MAIN_INBOUND_ID", "XUI_NEW_CLIENT_INBOUND_IDS", "XUI_NEW_CLIENT_FLOW", "XUI_NEW_CLIENT_GROUP",
     "XUI_NEW_CLIENT_COMMENT", "XUI_SUBSCRIPTION_LINK_TEMPLATE", "XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE", "ADMIN_IDS",
+    "CRYPTO_PAYMENTS_CONFIG",
 }
 EDITABLE_ENV_KEYS = tuple(sorted(
     BOOLEAN_ENV_KEYS | POSITIVE_INTEGER_ENV_KEYS | NONNEGATIVE_INTEGER_ENV_KEYS |
@@ -70,7 +71,7 @@ ENV_SETTING_GROUPS = {
     )),
     "balance": ("Баланс и рефералы", (
         "BALANCE_PRICE_PER_MONTH", "BALANCE_MIN_TOPUP_RUB", "BALANCE_MAX_TOPUP_RUB",
-        "CRYPTO_TOPUP_ENABLED", "REFERRAL_PERCENT",
+        "CRYPTO_TOPUP_ENABLED", "CRYPTO_PAYMENTS_CONFIG", "REFERRAL_PERCENT",
     )),
     "other": ("Дополнительные переменные", ()),
 }
@@ -85,6 +86,7 @@ ENV_DESCRIPTIONS = {
     "BALANCE_PRICE_PER_MONTH": "Цена месяца подписки в рублях при оплате с баланса. Индивидуальная цена клиента имеет приоритет.",
     "BOT_TOKEN": "Токен Telegram-бота, выданный @BotFather. Определяет, от имени какого бота работает служба.",
     "CRYPTO_TOPUP_ENABLED": "Показывать клиентам кнопку пополнения баланса криптовалютой.",
+    "CRYPTO_PAYMENTS_CONFIG": "Путь к JSON-конфигурации собственной службы криптопополнений. Пустое значение скрывает её кнопку.",
     "DB_PATH": "Путь к файлу SQLite с данными бота. При изменении пути существующая база не переносится.",
     "REFERRAL_PERCENT": "Процент подтверждённого пополнения реферала, который начисляется пригласившему. От 0 до 100.",
     "STARS_INVOICE_DESCRIPTION": "Описание, которое клиент увидит в счёте Telegram Stars на продление.",

@@ -6,8 +6,20 @@ from telegram import LinkPreviewOptions
 from telegram.error import BadRequest
 from telegram.ext import BaseUpdateProcessor
 
-from .backup import run_daily_backups
+from .backup import MOSCOW_TIME, run_daily_backups
 from .config import *
+from .crypto_payments import (
+    ASSETS,
+    CryptoPaymentError,
+    PaymentConfig,
+    create_invoice,
+    crypto_amount,
+    get_invoice,
+    init_crypto_db,
+    invoice_received,
+    load_payment_config,
+    user_invoices,
+)
 from .database import *
 from .env_settings import (
     ENV_SETTING_GROUP_BY_KEY,
@@ -172,7 +184,10 @@ class MenuScreen:
 
 
 def discard_draft_input(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for key in ("client_waiting_ticket_text", "admin_broadcast_mode", "balance_topup_method", "env_edit_setting"):
+    for key in (
+        "client_waiting_ticket_text", "admin_broadcast_mode", "balance_topup_method",
+        "crypto_topup_asset", "env_edit_setting",
+    ):
         context.user_data.pop(key, None)
 
 
@@ -1457,12 +1472,111 @@ async def show_client_balance(screen: MenuScreen, user_id: int) -> None:
     topup_note = "Пополнение P2P проверяет администратор."
     if CRYPTO_TOPUP_ENABLED:
         topup_note = "Пополнение P2P и криптовалютой проверяет администратор."
+    if CRYPTO_PAYMENTS_CONFIG:
+        topup_note += " Платежи по криптосчетам зачисляются автоматически после подтверждения в сети."
     await screen.reply_text(
         f"💰 Ваш баланс: <b>{balance_of(user_id)} ₽</b>\n\n"
         f"{topup_note} После зачисления выберите срок подписки и оплатите её с баланса.",
         parse_mode=ParseMode.HTML,
         reply_markup=balance_keyboard(),
     )
+
+
+def client_crypto_config() -> PaymentConfig:
+    if not CRYPTO_PAYMENTS_CONFIG:
+        raise CryptoPaymentError("Автоматическое криптопополнение отключено.")
+    try:
+        return load_payment_config(CRYPTO_PAYMENTS_CONFIG)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        logger.warning("Конфигурация криптоплатежей недоступна (%s).", type(exc).__name__)
+        raise CryptoPaymentError("Криптопополнение временно недоступно.") from None
+
+
+async def show_crypto_menu(screen: MenuScreen, config: PaymentConfig) -> None:
+    rows = [
+        [InlineKeyboardButton(asset.label, callback_data=f"cryptopay:asset:{code}")]
+        for code, asset in ASSETS.items() if code in config.rates
+    ]
+    rows.append([InlineKeyboardButton("Мои криптосчета", callback_data="cryptopay:history")])
+    rows.append([InlineKeyboardButton("⬅️ К балансу", callback_data="cryptopay:balance")])
+    await screen.reply_text("Выберите валюту и сеть для пополнения баланса.", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def show_crypto_invoice(screen: MenuScreen, invoice) -> None:
+    asset = ASSETS[invoice["asset"]]
+    expected = crypto_amount(int(invoice["expected"]), asset.decimals)
+    received = invoice_received(invoice["id"])
+    date_limit = datetime.fromtimestamp(invoice["expires_at"], MOSCOW_TIME).strftime("%d.%m.%Y %H:%M МСК")
+    if invoice["credited_at"] is not None:
+        status = f"✅ Зачислено {invoice['rubles']} ₽."
+    elif time.time() <= invoice["expires_at"]:
+        status = "Ожидаем платёж и подтверждение сети."
+    elif received:
+        status = "Счёт истёк, перевод найден. Если баланс не пополнится, обратитесь в поддержку с номером счёта."
+    else:
+        status = "Счёт истёк. Если вы уже отправили платёж, дождитесь подтверждения сети."
+    text = (
+        f"Криптосчёт №<code>{invoice['id']}</code>\n"
+        f"Сеть и валюта: <b>{asset.label}</b>\n"
+        f"Пополнение: <b>{invoice['rubles']} ₽</b>\n"
+        f"Сумма перевода: <code>{expected}</code> {asset.symbol}\n"
+        f"Адрес: <code>{html.escape(invoice['address'])}</code>\n"
+        f"Срок оплаты: {date_limit}\n"
+    )
+    if invoice["memo"]:
+        text += f"Обязательный комментарий к переводу: <code>{invoice['memo']}</code>\n"
+    if received:
+        text += f"Подтверждено сетью: {crypto_amount(received, asset.decimals)} {asset.symbol}\n"
+    await screen.reply_text(
+        f"{text}\n{status}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Проверить статус", callback_data=f"cryptopay:invoice:{invoice['id']}")],
+            [InlineKeyboardButton("⬅️ К пополнению", callback_data="cryptopay:menu")],
+        ]),
+    )
+
+
+async def handle_crypto_button(screen: MenuScreen, user_id: int, value: str) -> None:
+    if screen.message.chat.type != "private" or is_banned(user_id):
+        return
+    operation, _, argument = value.partition(":")
+    if operation == "balance":
+        await show_client_balance(screen, user_id)
+        return
+    if operation == "invoice":
+        invoice = get_invoice(user_id, argument)
+        if invoice:
+            await show_crypto_invoice(screen, invoice)
+        else:
+            await screen.reply_text("Счёт не найден.")
+        return
+    if operation == "history":
+        rows = [
+            [InlineKeyboardButton(
+                f"{'✅ ' if invoice['credited_at'] is not None else ''}{ASSETS[invoice['asset']].label} · "
+                f"{invoice['rubles']} ₽ · {invoice['id'][-6:]}",
+                callback_data=f"cryptopay:invoice:{invoice['id']}",
+            )]
+            for invoice in user_invoices(user_id)
+        ]
+        rows.append([InlineKeyboardButton("⬅️ К пополнению", callback_data="cryptopay:menu")])
+        await screen.reply_text("Последние криптосчета", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    try:
+        config = client_crypto_config()
+    except CryptoPaymentError as exc:
+        await screen.reply_text(str(exc))
+        return
+    if operation == "menu":
+        await show_crypto_menu(screen, config)
+    elif operation == "asset" and argument in config.rates:
+        screen.context.user_data["crypto_topup_asset"] = argument
+        await screen.reply_text(
+            f"{ASSETS[argument].label}\nВведите сумму пополнения в рублях "
+            f"от {BALANCE_MIN_TOPUP_RUB} до {BALANCE_MAX_TOPUP_RUB}.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cryptopay:menu")]]),
+        )
 
 
 async def show_client_tickets(screen: MenuScreen) -> None:
@@ -1559,6 +1673,21 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
         await show_client_subscription(screen, user.id)
+        return True
+
+    crypto_asset = context.user_data.get("crypto_topup_asset")
+    if crypto_asset and message.chat.type == "private":
+        try:
+            rubles = int(text) if re.fullmatch(r"[0-9]{1,12}", text) else 0
+            invoice = create_invoice(client_crypto_config(), user.id, crypto_asset, rubles)
+        except CryptoPaymentError as exc:
+            await screen.reply_text(
+                str(exc),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cryptopay:menu")]]),
+            )
+        else:
+            context.user_data.pop("crypto_topup_asset", None)
+            await show_crypto_invoice(screen, invoice)
         return True
 
     if context.user_data.get("client_waiting_renew_months"):
@@ -3763,6 +3892,7 @@ def clear_pending_input(context: ContextTypes.DEFAULT_TYPE) -> None:
         "client_waiting_stars_months",
         "client_waiting_subscribe_months",
         "client_waiting_ticket_text",
+        "crypto_topup_asset",
         "env_edit_setting",
         "reply_to_ticket_id",
     ):
@@ -3918,6 +4048,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action != "renewpay":
         context.user_data.pop("client_waiting_renew_months", None)
         context.user_data.pop("client_renew_months", None)
+
+    if action == "cryptopay":
+        if CRYPTO_PAYMENTS_CONFIG:
+            await handle_crypto_button(screen, user.id, value)
+        return
 
     if action == "balance":
         if value not in {"p2p", "crypto"}:
@@ -5238,6 +5373,8 @@ def build_app() -> Application:
 
 def main() -> None:
     init_db()
+    if CRYPTO_PAYMENTS_CONFIG:
+        init_crypto_db()
     app = build_app()
     logger.info("Бот техподдержки запущен")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
