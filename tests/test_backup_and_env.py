@@ -76,6 +76,10 @@ class EnvSettingsTests(unittest.TestCase):
         self.assertEqual(set(env_settings.EDITABLE_ENV_KEYS), env_settings.ENV_DESCRIPTIONS.keys())
         self.assertTrue(all(env_settings.ENV_DESCRIPTIONS.values()))
 
+    def test_all_supported_settings_belong_to_one_group(self):
+        keys = [key for _, group_keys in env_settings.ENV_SETTING_GROUPS.values() for key in group_keys]
+        self.assertCountEqual(keys, env_settings.EDITABLE_ENV_KEYS)
+
     def test_custom_descriptions_use_adjacent_comments_above_setting(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

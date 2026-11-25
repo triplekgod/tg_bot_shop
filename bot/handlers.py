@@ -9,6 +9,8 @@ from .backup import run_daily_backups
 from .config import *
 from .database import *
 from .env_settings import (
+    ENV_SETTING_GROUP_BY_KEY,
+    ENV_SETTING_GROUPS,
     env_display_value,
     env_key_reference,
     env_setting_descriptions,
@@ -188,15 +190,34 @@ def can_edit_env(update: Update) -> bool:
 
 
 async def show_env_settings(
-    screen: MenuScreen, page: int = 1, notice: str = "", selected_key: Optional[str] = None,
+    screen: MenuScreen, group: Optional[str] = None, page: int = 1, *,
+    notice: str = "", selected_key: Optional[str] = None,
 ) -> None:
     try:
         values = env_settings_values()
     except (OSError, UnicodeError):
         await screen.reply_text("Не удалось прочитать .env.")
         return
-    keys = list(values)
     if selected_key in values:
+        group = ENV_SETTING_GROUP_BY_KEY.get(selected_key, "other")
+    available_groups = {ENV_SETTING_GROUP_BY_KEY.get(key, "other") for key in values}
+    if group not in available_groups:
+        rows = [
+            [InlineKeyboardButton(label, callback_data=f"envsettings:group:{code}:1")]
+            for code, (label, _) in ENV_SETTING_GROUPS.items() if code in available_groups
+        ]
+        await screen.reply_text(
+            "⚙️ Настройки .env\n\nВыберите раздел.",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    title, group_keys = ENV_SETTING_GROUPS[group]
+    if group == "other":
+        keys = [key for key in values if key not in ENV_SETTING_GROUP_BY_KEY]
+    else:
+        keys = [key for key in group_keys if key in values]
+    if selected_key in keys:
         page = keys.index(selected_key) // ENV_SETTINGS_PAGE_SIZE + 1
     pages = (len(keys) + ENV_SETTINGS_PAGE_SIZE - 1) // ENV_SETTINGS_PAGE_SIZE
     page = max(1, min(page, pages))
@@ -218,14 +239,15 @@ async def show_env_settings(
         rows.append([InlineKeyboardButton(f"Изменить {label}", callback_data=f"envsettings:edit:{env_key_reference(key)}")])
     navigation = []
     if page > 1:
-        navigation.append(InlineKeyboardButton("⬅️", callback_data=f"envsettings:list:{page - 1}"))
+        navigation.append(InlineKeyboardButton("⬅️", callback_data=f"envsettings:group:{group}:{page - 1}"))
     if page < pages:
-        navigation.append(InlineKeyboardButton("➡️", callback_data=f"envsettings:list:{page + 1}"))
+        navigation.append(InlineKeyboardButton("➡️", callback_data=f"envsettings:group:{group}:{page + 1}"))
     if navigation:
         rows.append(navigation)
+    rows.append([InlineKeyboardButton("⬅️ К разделам", callback_data="envsettings:list")])
     current_values = "\n\n".join(lines)
     await screen.reply_text(
-        f"{notice}⚙️ Настройки .env · {page}/{pages}\n\n{current_values}\n\n"
+        f"{notice}⚙️ {title} · {page}/{pages}\n\n{current_values}\n\n"
         "Изменения применятся после перезапуска бота.",
         reply_markup=InlineKeyboardMarkup(rows),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -3777,9 +3799,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not can_edit_env(update):
             return
         operation, _, argument = value.partition(":")
-        if operation == "list" and argument.isdecimal():
+        if operation == "list":
             clear_pending_input(context)
-            await show_env_settings(screen, int(argument))
+            await show_env_settings(screen)
+        elif operation == "group":
+            group, _, page = argument.partition(":")
+            if group in ENV_SETTING_GROUPS and page.isdecimal():
+                clear_pending_input(context)
+                await show_env_settings(screen, group, int(page))
         elif operation == "edit":
             try:
                 keys = env_settings_values()

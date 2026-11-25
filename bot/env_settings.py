@@ -45,6 +45,37 @@ EDITABLE_ENV_KEYS = tuple(sorted(
     }
 ))
 
+ENV_SETTING_GROUPS = {
+    "bot": ("Бот, администраторы и база", (
+        "BOT_TOKEN", "ADMIN_IDS", "SUPER_ADMIN_ID", "DB_PATH",
+    )),
+    "panel": ("Подключение к 3x-ui", (
+        "XUI_BASE_URL", "XUI_API_TOKEN", "XUI_USERNAME", "XUI_PASSWORD", "XUI_VERIFY_SSL", "XUI_TIMEOUT",
+    )),
+    "clients": ("Клиенты 3x-ui", (
+        "XUI_CLIENTS_PER_PAGE", "XUI_GROUP_CLIENTS_BY_EMAIL", "XUI_SYNC_TGID_TO_PANEL_ON_LINK",
+        "XUI_NEW_CLIENT_INBOUND_IDS", "XUI_NEW_CLIENT_EMAIL_PREFIX", "XUI_NEW_CLIENT_FLOW",
+        "XUI_NEW_CLIENT_GROUP", "XUI_NEW_CLIENT_COMMENT", "XUI_NEW_CLIENT_LIMIT_IP", "XUI_NEW_CLIENT_TOTAL_GB",
+    )),
+    "subscriptions": ("Подписки и продление", (
+        "XUI_RENEW_MODE", "XUI_CLIENTS_RENEW_METHOD", "XUI_RENEW_EXPIRED_FROM_NOW", "XUI_MAIN_INBOUND_ID",
+        "XUI_DEFAULT_RENEW_DAYS", "XUI_DAYS_PER_MONTH", "XUI_MAX_RENEW_MONTHS", "XUI_RESTART_XRAY_AFTER_RENEW",
+        "XUI_PUBLIC_SUBSCRIPTION_BASE_URL", "XUI_SUBSCRIPTION_LINK_TEMPLATE",
+    )),
+    "stars": ("Telegram Stars", (
+        "STARS_PAYMENTS_ENABLED", "STARS_PRICE_PER_MONTH", "STARS_MIN_AMOUNT", "STARS_MAX_AMOUNT",
+        "STARS_INVOICE_TITLE", "STARS_INVOICE_DESCRIPTION",
+    )),
+    "balance": ("Баланс и рефералы", (
+        "BALANCE_PRICE_PER_MONTH", "BALANCE_MIN_TOPUP_RUB", "BALANCE_MAX_TOPUP_RUB",
+        "CRYPTO_TOPUP_ENABLED", "REFERRAL_PERCENT",
+    )),
+    "other": ("Дополнительные переменные", ()),
+}
+ENV_SETTING_GROUP_BY_KEY = {
+    key: group for group, (_, keys) in ENV_SETTING_GROUPS.items() for key in keys
+}
+
 ENV_DESCRIPTIONS = {
     "ADMIN_IDS": "Telegram ID администраторов, которых бот добавляет при запуске. Укажите ID через запятую.",
     "BALANCE_MAX_TOPUP_RUB": "Максимальная сумма одной заявки на пополнение баланса, в рублях.",

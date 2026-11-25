@@ -393,6 +393,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers, "is_super_admin", side_effect=lambda user_id: user_id == 1),
             patch.object(handlers, "env_settings_values", return_value={
                 "BALANCE_PRICE_PER_MONTH": "250", "XUI_API_TOKEN": "test-token-value",
+                "CUSTOM_PARAMETER": "custom-value",
             }),
             patch.object(handlers, "save_env_value") as save,
         ):
@@ -400,19 +401,47 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             labels = [button.text for row in self.last_reply_markup.keyboard for button in row]
             self.assertIn(handlers.ADMIN_BUTTON_ENV_SETTINGS, labels)
             await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
-            self.assertIn("BALANCE_PRICE_PER_MONTH = 250", self.reply_text.await_args.args[0])
-            self.assertIn("Цена месяца подписки в рублях при оплате с баланса", self.reply_text.await_args.args[0])
-            self.assertIn("XUI_API_TOKEN = test-token-value", self.reply_text.await_args.args[0])
-            buttons = [row[0] for row in self.last_reply_markup.inline_keyboard]
-            self.assertEqual([button.text for button in buttons], ["Изменить BALANCE_PRICE_PER_MONTH", "Изменить XUI_API_TOKEN"])
-            await self.click(1, buttons[1].callback_data)
+            self.assertIn("Выберите раздел", self.reply_text.await_args.args[0])
+            self.assertNotIn("test-token-value", self.reply_text.await_args.args[0])
+            groups = {row[0].text: row[0].callback_data for row in self.last_reply_markup.inline_keyboard}
+            self.assertEqual(list(groups), ["Подключение к 3x-ui", "Баланс и рефералы", "Дополнительные переменные"])
+
+            await self.click(1, groups["Дополнительные переменные"])
+            self.assertIn("CUSTOM_PARAMETER = custom-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            await self.click(1, self.last_reply_markup.inline_keyboard[-1][0].callback_data)
+            await self.click(1, groups["Подключение к 3x-ui"])
+            self.assertIn("XUI_API_TOKEN = test-token-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
             self.assertIn("test-token-value", self.context.bot.edit_message_text.await_args.kwargs["text"])
             self.assertIn("API-токен 3x-ui", self.context.bot.edit_message_text.await_args.kwargs["text"])
-            await self.click(1, "envsettings:edit:BALANCE_PRICE_PER_MONTH")
+            await self.click(1, self.cancel_button_data())
+            self.assertIn("Подключение к 3x-ui", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            await self.click(1, self.last_reply_markup.inline_keyboard[-1][0].callback_data)
+
+            await self.click(1, groups["Баланс и рефералы"])
+            text = self.context.bot.edit_message_text.await_args.kwargs["text"]
+            self.assertIn("BALANCE_PRICE_PER_MONTH = 250", text)
+            self.assertIn("Цена месяца подписки в рублях при оплате с баланса", text)
+            await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
             await self.press(1, "320")
             save.assert_called_once_with("BALANCE_PRICE_PER_MONTH", "320")
             self.assertNotIn("env_edit_setting", self.context.user_data)
-            self.assertIn("после перезапуска", self.context.bot.edit_message_text.await_args.kwargs["text"])
+            text = self.context.bot.edit_message_text.await_args.kwargs["text"]
+            self.assertIn("Баланс и рефералы", text)
+            self.assertIn("после перезапуска", text)
+
+    async def test_env_cancel_returns_to_second_page_of_group(self):
+        keys = handlers.ENV_SETTING_GROUPS["clients"][1]
+        with (
+            patch.object(handlers, "is_super_admin", return_value=True),
+            patch.object(handlers, "env_settings_values", return_value=dict.fromkeys(keys)),
+        ):
+            await self.press(1, handlers.ADMIN_BUTTON_ENV_SETTINGS)
+            await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
+            await self.click(1, self.last_reply_markup.inline_keyboard[-2][0].callback_data)
+            await self.click(1, self.last_reply_markup.inline_keyboard[0][0].callback_data)
+            await self.click(1, self.cancel_button_data())
+            self.assertIn("Клиенты 3x-ui · 2/2", self.context.bot.edit_message_text.await_args.kwargs["text"])
 
     async def test_env_controls_reject_other_admins_and_group_chats(self):
         await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
