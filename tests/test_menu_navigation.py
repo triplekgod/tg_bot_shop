@@ -23,6 +23,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(module, "db", return_value=connection))
         database.init_db()
         stack.enter_context(patch.object(handlers, "is_admin", side_effect=lambda user_id: user_id == 1))
+        stack.enter_context(patch.object(tickets, "is_admin", side_effect=lambda user_id: user_id == 1))
         self.notify = stack.enter_context(patch.object(handlers, "notify_admins_about_user_message", new_callable=AsyncMock))
         self.broadcast = stack.enter_context(patch.object(handlers, "broadcast_text_to_users", new_callable=AsyncMock))
         self.broadcast.return_value = (1, 0)
@@ -40,8 +41,10 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             bot=SimpleNamespace(
                 username="shop_test_bot",
                 delete_message=AsyncMock(),
+                delete_messages=AsyncMock(),
                 edit_message_reply_markup=AsyncMock(),
                 edit_message_text=AsyncMock(side_effect=self.edit_reply),
+                send_message=AsyncMock(return_value=SimpleNamespace(delete=AsyncMock())),
             ),
         )
 
@@ -74,9 +77,11 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await handlers.button_callback(Update(self.next_id, callback_query=query), self.context)
 
     def cancel_button_data(self):
-        data = self.last_reply_markup.inline_keyboard[-1][0].callback_data
-        self.assertTrue(data.startswith("input:cancel:"))
-        return data
+        for row in self.last_reply_markup.inline_keyboard:
+            for button in row:
+                if button.callback_data.startswith("input:cancel:"):
+                    return button.callback_data
+        self.fail("Cancel button is missing")
 
     def mock_subscription(self, stack):
         stack.enter_context(patch.object(handlers, "resolve_xui_email_for_user", return_value=("vpn-client", "linked")))
@@ -89,7 +94,9 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await self.press(1, handlers.ADMIN_BUTTON_HELP)
         await self.press(1, "Текст после выхода из рассылки")
         self.assertNotIn("admin_broadcast_mode", self.context.user_data)
-        self.context.bot.delete_message.assert_any_await(1, prompt)
+        edit = self.context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edit["message_id"], prompt)
+        self.assertIn("Команды администратора", edit["text"])
         self.broadcast.assert_not_awaited()
 
     async def test_admin_can_switch_audience_cancel_and_send(self):
@@ -121,7 +128,8 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         await self.click(2, "clientticket:new")
         prompt = self.context.chat_data["menu_screen_ids"][0]
         await self.click(2, self.cancel_button_data())
-        self.context.bot.delete_message.assert_any_await(2, prompt)
+        self.assertEqual(self.context.chat_data["menu_screen_ids"], [prompt])
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][0].callback_data, "clientticket:new")
         await self.press(2, "Текст после отмены")
         self.assertIsNone(tickets.get_latest_open_ticket(2))
         await self.press(2, handlers.CLIENT_BUTTON_TICKET)
@@ -174,8 +182,7 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.context.bot.delete_message.assert_not_awaited()
 
         await handlers.start(Update(2, message=self.message(2, text="/start")), self.context)
-        self.context.bot.delete_message.assert_any_await(2, keyboard_id)
-        self.context.bot.delete_message.assert_any_await(2, inline_screen_id)
+        self.context.bot.delete_messages.assert_awaited_once_with(2, sorted([inline_screen_id, keyboard_id]))
 
     async def test_edited_and_repeated_updates_do_not_render_twice(self):
         message = self.message(2, text=handlers.CLIENT_BUTTON_BALANCE, message_id=80)
@@ -313,3 +320,60 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             finish.set()
             await asyncio.gather(slow, queued)
         self.assertTrue(same_chat_ran.is_set())
+
+    async def test_leaving_connection_guide_removes_all_copies_and_confirmation(self):
+        await handlers.start(Update(1, message=self.message(2, text="/start")), self.context)
+        keyboard_id = self.context.chat_data["menu_keyboard_id"]
+        copied = [200, 201, 202]
+        with (
+            patch.object(handlers, "count_subscription_welcome_messages", return_value=3),
+            patch.object(handlers, "send_subscription_welcome_messages", return_value=copied),
+        ):
+            await self.press(2, handlers.CLIENT_BUTTON_CONNECTION_GUIDE)
+        guide_ids = self.context.chat_data["menu_screen_ids"].copy()
+        self.assertEqual(guide_ids[:-1], copied)
+        self.assertIsNone(self.last_reply_markup)
+        await self.press(2, handlers.CLIENT_BUTTON_BALANCE)
+        self.context.bot.delete_messages.assert_awaited_once_with(2, sorted(guide_ids))
+        self.assertEqual(self.context.chat_data["menu_keyboard_id"], keyboard_id)
+
+    async def test_client_ticket_history_has_its_own_screen_and_paginates(self):
+        await self.press(2, handlers.CLIENT_BUTTON_TICKET)
+        buttons = [row[0] for row in self.last_reply_markup.inline_keyboard]
+        self.assertEqual([button.text for button in buttons], ["Новое обращение", "История обращений"])
+        for _ in range(11):
+            tickets.create_ticket(2)
+        await self.press(3, handlers.CLIENT_BUTTON_TICKET)
+        other_ticket = tickets.create_ticket(3)
+        await self.press(2, handlers.CLIENT_BUTTON_TICKET)
+        await self.click(2, buttons[1].callback_data)
+        first_page = [button.callback_data for row in self.last_reply_markup.inline_keyboard for button in row]
+        self.assertEqual(sum(value.startswith("clientticket:view:") for value in first_page), 10)
+        self.assertNotIn(f"clientticket:view:{other_ticket}:1", first_page)
+        await self.click(2, "clientticket:history:2")
+        own_ticket = self.last_reply_markup.inline_keyboard[0][0].callback_data
+        self.assertTrue(own_ticket.endswith(":2"))
+        await self.click(2, own_ticket)
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][0].callback_data, "clientticket:history:2")
+
+    async def test_admin_inline_navigation_uses_current_message_without_echoing_button(self):
+        await handlers.start(Update(1, message=self.message(1, text="/start")), self.context)
+        menu_id = self.context.chat_data["menu_screen_ids"][0]
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][1].callback_data, "adminmenu:tickets")
+        await self.click(1, "adminmenu:tickets")
+        edit = self.context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edit["message_id"], menu_id)
+        self.assertNotEqual(edit["text"], handlers.ADMIN_BUTTON_TICKETS_GROUP)
+        await self.click(1, "adminmenu:welcome")
+        self.assertIn("Сообщения новым клиентам", self.context.bot.edit_message_text.await_args.kwargs["text"])
+        self.assertEqual(self.last_reply_markup.inline_keyboard[-1][0].callback_data, "adminmenu:main")
+        self.reply_text.assert_awaited_once()
+        await self.click(1, "adminmenu:main")
+        self.assertEqual(self.last_reply_markup.inline_keyboard[0][1].callback_data, "adminmenu:tickets")
+
+    async def test_client_cannot_use_admin_menu_callback(self):
+        await self.press(2, handlers.CLIENT_BUTTON_TICKET)
+        await self.click(2, "adminmenu:broadcast-all")
+        self.assertNotIn("admin_broadcast_mode", self.context.user_data)
+        self.reply_text.assert_awaited_once()
+        self.context.bot.edit_message_text.assert_not_awaited()

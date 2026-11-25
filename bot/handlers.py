@@ -1,6 +1,7 @@
 from collections.abc import Awaitable
 from weakref import WeakValueDictionary
 
+from telegram import ReplyKeyboardRemove
 from telegram.error import BadRequest
 from telegram.ext import BaseUpdateProcessor
 
@@ -53,7 +54,9 @@ class ChatUpdateProcessor(BaseUpdateProcessor):
             CLIENT_BUTTON_TICKET,
             CLIENT_BUTTON_CONNECTION_GUIDE,
             "🆘 Обращение",
-        } or callback in {"balance:p2p", "balance:crypto", "subscription:renew", "clientticket:new"}
+        } or callback in {"balance:p2p", "balance:crypto", "subscription:renew"} or (
+            isinstance(callback, str) and callback.startswith("clientticket:")
+        )
         return navigation and not is_admin(user.id)
 
 
@@ -88,6 +91,12 @@ class MenuScreen:
         # Inline menus need the previous message that carries the bottom keyboard.
         obsolete_ids.discard(chat_data.get("menu_keyboard_id"))
         obsolete_ids.discard(message_id)
+        if 1 < len(obsolete_ids) <= 100:
+            try:
+                await self.context.bot.delete_messages(self.message.chat_id, sorted(obsolete_ids))
+                return
+            except TelegramError:
+                pass
         for previous_id in obsolete_ids:
             try:
                 await self.context.bot.delete_message(self.message.chat_id, previous_id)
@@ -100,7 +109,19 @@ class MenuScreen:
                 except TelegramError:
                     pass
 
+    def add_admin_menu_link(self, kwargs: dict) -> None:
+        user = self.update.effective_user
+        markup = kwargs.get("reply_markup")
+        if not user or not is_admin(user.id) or (markup is not None and not isinstance(markup, InlineKeyboardMarkup)):
+            return
+        rows = markup.inline_keyboard if markup else ()
+        if any((button.callback_data or "").startswith("adminmenu:") for row in rows for button in row):
+            return
+        back = InlineKeyboardButton(ADMIN_BUTTON_BACK, callback_data="adminmenu:main")
+        kwargs["reply_markup"] = InlineKeyboardMarkup([*rows, [back]])
+
     async def reply_text(self, text: str, **kwargs) -> None:
+        self.add_admin_menu_link(kwargs)
         chat_data = self.context.chat_data
         markup = kwargs.get("reply_markup")
         inline_id = chat_data.get("menu_editable_id")
@@ -132,6 +153,7 @@ class MenuScreen:
         await self.track(sent.message_id, replaced_keyboard_id)
 
     async def edit_text(self, *args, **kwargs) -> None:
+        self.add_admin_menu_link(kwargs)
         await self.update.callback_query.edit_message_text(*args, **kwargs)
         if self.message.message_id in self.message_ids:
             await self.track(self.message.message_id)
@@ -146,6 +168,19 @@ class MenuScreen:
             await self.message.delete()
         except TelegramError:
             pass
+
+
+async def remove_legacy_admin_keyboard(screen: MenuScreen) -> None:
+    if screen.context.chat_data.get("admin_reply_keyboard_removed"):
+        return
+    try:
+        sent = await screen.context.bot.send_message(
+            chat_id=screen.message.chat_id, text="Обновляю меню…", reply_markup=ReplyKeyboardRemove(),
+        )
+        screen.context.chat_data["admin_reply_keyboard_removed"] = True
+        await sent.delete()
+    except TelegramError:
+        pass
 
 
 def discard_draft_input(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,9 +215,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("✅ Вы зарегистрированы по реферальной ссылке. Вашему пригласившему будет начисляться 25% с ваших пополнений.")
 
     if is_admin(user.id):
+        await remove_legacy_admin_keyboard(screen)
         await screen.reply_text(
             "Панель техподдержки.\n\n"
-            "Снизу есть меню с быстрыми кнопками для обращений, заявок на продление/оформление, клиентов 3x-ui, продления, статистики и рассылки.\n\n"
+            "Кнопки под сообщением открывают обращения, заявки, клиентов 3x-ui, статистику и рассылки.\n\n"
             "Основные команды:\n"
             "/tickets — открытые обращения\n"
             "/history — история обращений\n"
@@ -215,7 +251,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     screen = MenuScreen(update, context)
     user_id = update.effective_user.id if update.effective_user else None
-    if not update.message:
+    if not update.effective_message:
         return
 
     if is_admin(user_id):
@@ -1280,6 +1316,46 @@ async def show_client_balance(screen: MenuScreen, user_id: int) -> None:
     )
 
 
+async def show_client_tickets(screen: MenuScreen) -> None:
+    await screen.reply_text(
+        "🆘 Обращения в поддержку",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Новое обращение", callback_data="clientticket:new")],
+            [InlineKeyboardButton("История обращений", callback_data="clientticket:history:1")],
+        ]),
+    )
+
+
+async def show_client_ticket_history(screen: MenuScreen, user_id: int, page: int) -> None:
+    page_size = 10
+    with db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM tickets WHERE user_id = ?", (user_id,)).fetchone()[0]
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(max(1, page), pages)
+        rows = conn.execute(
+            "SELECT id, status FROM tickets WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            (user_id, page_size, (page - 1) * page_size),
+        ).fetchall()
+
+    buttons = [
+        [InlineKeyboardButton(
+            f"#{row['id']} — {'Открыто' if row['status'] == 'open' else 'Закрыто'}",
+            callback_data=f"clientticket:view:{row['id']}:{page}",
+        )]
+        for row in rows
+    ]
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton("⬅️", callback_data=f"clientticket:history:{page - 1}"))
+    if page < pages:
+        navigation.append(InlineKeyboardButton("➡️", callback_data=f"clientticket:history:{page + 1}"))
+    if navigation:
+        buttons.append(navigation)
+    buttons.append([InlineKeyboardButton("⬅️ К обращениям", callback_data="clientticket:menu")])
+    detail = f"Всего: {total} · страница {page}/{pages}" if rows else "Обращений пока нет."
+    await screen.reply_text(f"📚 История обращений\n\n{detail}", reply_markup=InlineKeyboardMarkup(buttons))
+
+
 async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     screen = MenuScreen(update, context)
     user = update.effective_user
@@ -1315,29 +1391,21 @@ async def handle_client_menu_button(update: Update, context: ContextTypes.DEFAUL
         return True
 
     if text == CLIENT_BUTTON_TICKET:
-        with db() as conn:
-            rows = conn.execute("SELECT id, status, updated_at FROM tickets WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10", (user.id,)).fetchall()
-        history = "\n".join(f"#{row['id']} — {'открыто' if row['status'] == 'open' else 'закрыто'} ({row['updated_at']})" for row in rows) or "Обращений пока нет."
-        buttons = [[InlineKeyboardButton(f"#{row['id']} — {'🟢' if row['status'] == 'open' else '⚪'}", callback_data=f"clientticket:view:{row['id']}")] for row in rows]
-        buttons.append([InlineKeyboardButton("➕ Новое обращение", callback_data="clientticket:new")])
-        await screen.reply_text(
-            f"🆘 Ваши обращения:\n{history}",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        await show_client_tickets(screen)
         return True
 
     if text == CLIENT_BUTTON_CONNECTION_GUIDE:
         count = count_subscription_welcome_messages()
         if not count:
-            await screen.reply_text("Инструкция по подключению пока не настроена. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Инструкция по подключению пока не настроена. Обратитесь в поддержку.")
             return True
         sent_ids = await send_subscription_welcome_messages(context, user.id)
         if sent_ids:
             for message_id in sent_ids:
                 await screen.track(message_id)
-            await screen.reply_text("📘 Инструкции по подключению отправлены выше.", reply_markup=client_main_keyboard())
+            await screen.reply_text("📘 Инструкции по подключению отправлены выше.")
         else:
-            await screen.reply_text("Не удалось отправить инструкции. Обратитесь в поддержку.", reply_markup=client_main_keyboard())
+            await screen.reply_text("Не удалось отправить инструкции. Обратитесь в поддержку.")
         return True
 
     if text == CLIENT_BUTTON_SUBSCRIPTION:
@@ -1946,24 +2014,25 @@ async def send_admin_notification_settings(screen: MenuScreen, admin_id: int) ->
     await screen.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=admin_notification_keyboard(admin_id))
 
 
-async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def handle_admin_menu_button(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, menu_label: Optional[str] = None,
+) -> bool:
     screen = MenuScreen(update, context)
-    message = update.effective_message
-    if not message or not message.text:
+    if menu_label is None and (not update.message or not update.message.text):
         return False
 
-    text = message.text.strip()
+    text = menu_label if menu_label is not None else update.message.text.strip()
     text = {
         "📣 Рассылка": ADMIN_BUTTON_BROADCAST_ALL,
         "🔄 Обновить меню": ADMIN_BUTTON_REFRESH_MENUS,
     }.get(text, text)
 
     sections = {
-        ADMIN_BUTTON_REQUESTS_GROUP: ("📥 Заявки", "requests"),
-        ADMIN_BUTTON_TICKETS_GROUP: ("💬 Обращения", "tickets"),
-        ADMIN_BUTTON_XUI_GROUP: ("🖥 3x-ui", "xui"),
-        ADMIN_BUTTON_CLIENTS_GROUP: ("👥 Клиенты", "clients"),
-        ADMIN_BUTTON_SERVICE_GROUP: ("⚙️ Сервис", "service"),
+        ADMIN_BUTTON_REQUESTS_GROUP: "requests",
+        ADMIN_BUTTON_TICKETS_GROUP: "tickets",
+        ADMIN_BUTTON_XUI_GROUP: "xui",
+        ADMIN_BUTTON_CLIENTS_GROUP: "clients",
+        ADMIN_BUTTON_SERVICE_GROUP: "service",
     }
     commands = {
         ADMIN_BUTTON_TICKETS: tickets_command,
@@ -1989,12 +2058,14 @@ async def handle_admin_menu_button(update: Update, context: ContextTypes.DEFAULT
         return False
 
     clear_pending_input(context)
-    screen.remove_menu_press()
+    if menu_label is None:
+        screen.remove_menu_press()
+        await remove_legacy_admin_keyboard(screen)
 
     if text in sections:
-        title, section = sections[text]
+        section = sections[text]
         admin_id = update.effective_user.id if update.effective_user else None
-        await screen.reply_text(title, reply_markup=admin_section_keyboard(section, admin_id))
+        await screen.reply_text("Выберите действие.", reply_markup=admin_section_keyboard(section, admin_id))
         return True
 
     if text in commands:
@@ -2342,7 +2413,7 @@ async def subscription_events_command(update: Update, context: ContextTypes.DEFA
 @require_admin
 async def subscription_messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     screen = MenuScreen(update, context)
-    if not update.message:
+    if not update.effective_message:
         return
     count = count_subscription_welcome_messages()
     keyboard = InlineKeyboardMarkup(
@@ -2921,7 +2992,7 @@ async def xui_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @require_admin
 async def inbounds_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     screen = MenuScreen(update, context)
-    if not update.message:
+    if not update.effective_message:
         return
     try:
         async with XuiClient() as api:
@@ -3399,11 +3470,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def send_actual_menu_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """Отправляет пользователю актуальную reply-клавиатуру.
-
-    Telegram не умеет менять нижнюю клавиатуру молча: новая клавиатура
-    появляется только вместе с новым сообщением от бота.
-    """
+    """Отправляет актуальное меню администратора или нижнюю клавиатуру клиента."""
     try:
         if is_admin(user_id):
             await context.bot.send_message(
@@ -3428,7 +3495,7 @@ async def send_actual_menu_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: 
 @require_admin
 async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     screen = MenuScreen(update, context)
-    if not update.message:
+    if not update.effective_message:
         return
 
     with db() as conn:
@@ -3437,7 +3504,10 @@ async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYP
     user_ids = {int(row["user_id"]) for row in rows}
     user_ids.update(get_admin_ids())
 
-    ok = 0
+    current_user = update.effective_user
+    ok = int(bool(current_user and current_user.id in user_ids))
+    if current_user:
+        user_ids.discard(current_user.id)
     failed = 0
     skipped = 0
     for user_id in sorted(user_ids):
@@ -3610,6 +3680,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "noop":
         return
 
+    if action == "adminmenu":
+        menu_label = ADMIN_MENU_ACTIONS.get(value)
+        if menu_label and is_admin(user.id):
+            await handle_admin_menu_button(update, context, menu_label)
+        return
+
     if action == "input":
         screen_update_id = context.chat_data.get("menu_screen_update")
         if value != f"cancel:{screen_update_id}" or screen.message.message_id not in screen.message_ids:
@@ -3619,7 +3695,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await screen.reply_text("Рассылка отменена.", reply_markup=admin_section_keyboard("service", user.id))
         elif context.user_data.get("client_waiting_ticket_text"):
             clear_pending_input(context)
-            await screen.reply_text("Создание обращения отменено.", reply_markup=client_main_keyboard())
+            await show_client_tickets(screen)
         elif context.user_data.get("client_waiting_renew_months"):
             clear_pending_input(context)
             await show_client_subscription(screen, user.id)
@@ -3782,30 +3858,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await screen.reply_text(f"На сколько месяцев купить/продлить подписку за Stars?\nВведите число от 1 до {XUI_MAX_RENEW_MONTHS}.", reply_markup=client_main_keyboard())
         return
 
-    if action == "clientticket" and value == "new":
+    if action == "clientticket":
         if is_admin(user.id) or is_banned(user.id):
             return
-        clear_pending_input(context)
-        await screen.reply_text(
-            "Опишите проблему одним сообщением — я передам его в поддержку.",
-            reply_markup=cancel_input_keyboard(update.update_id),
-        )
-        context.user_data["client_waiting_ticket_text"] = True
-        return
-
-    if action == "clientticket" and value.startswith("view:"):
-        try:
-            ticket_id = int(value.split(":", 1)[1])
-        except ValueError:
-            return
-        ticket = get_ticket(ticket_id)
-        if not ticket or int(ticket["user_id"]) != user.id:
-            await screen.reply_text("Обращение не найдено.")
-            return
-        chunks = build_ticket_full_chat_chunks(ticket_id)
-        if chunks:
-            for chunk in chunks:
-                await screen.reply_text(chunk, parse_mode=ParseMode.HTML)
+        operation, _, argument = value.partition(":")
+        if operation == "new":
+            clear_pending_input(context)
+            await screen.reply_text(
+                "Опишите проблему одним сообщением — я передам его в поддержку.",
+                reply_markup=cancel_input_keyboard(update.update_id),
+            )
+            context.user_data["client_waiting_ticket_text"] = True
+        elif operation == "menu":
+            await show_client_tickets(screen)
+        elif operation == "history" and argument.isdecimal():
+            await show_client_ticket_history(screen, user.id, int(argument))
+        elif operation == "view":
+            ticket_id, _, page = argument.partition(":")
+            if not ticket_id.isdecimal() or (page and not page.isdecimal()):
+                return
+            ticket = get_ticket(int(ticket_id))
+            if not ticket or int(ticket["user_id"]) != user.id:
+                await screen.reply_text("Обращение не найдено.")
+                return
+            back = InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ К истории", callback_data=f"clientticket:history:{page or 1}"),
+            ]])
+            chunks = build_ticket_full_chat_chunks(int(ticket_id))
+            for index, chunk in enumerate(chunks):
+                await screen.reply_text(
+                    chunk, parse_mode=ParseMode.HTML, reply_markup=back if index == len(chunks) - 1 else None,
+                )
         return
 
     if action == "renewpay":

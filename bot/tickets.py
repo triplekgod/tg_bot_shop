@@ -1185,6 +1185,33 @@ ADMIN_BUTTON_ADMIN_SETTINGS = "👑 Админы и уведомления"
 ADMIN_BUTTON_TRIAL_SETTINGS = "🎁 Пробные подписки"
 ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
+ADMIN_MENU_ACTIONS = {
+    "main": ADMIN_BUTTON_BACK,
+    "requests": ADMIN_BUTTON_REQUESTS_GROUP,
+    "tickets": ADMIN_BUTTON_TICKETS_GROUP,
+    "xui": ADMIN_BUTTON_XUI_GROUP,
+    "clients": ADMIN_BUTTON_CLIENTS_GROUP,
+    "service": ADMIN_BUTTON_SERVICE_GROUP,
+    "open-tickets": ADMIN_BUTTON_TICKETS,
+    "history": ADMIN_BUTTON_HISTORY,
+    "welcome": ADMIN_BUTTON_NEW_CLIENT_MESSAGES,
+    "events": ADMIN_BUTTON_SUBSCRIPTION_EVENTS,
+    "topups": ADMIN_BUTTON_TOPUPS,
+    "status": ADMIN_BUTTON_XUI_STATUS,
+    "inbounds": ADMIN_BUTTON_INBOUNDS,
+    "renew": ADMIN_BUTTON_RENEW,
+    "users": ADMIN_BUTTON_USERS,
+    "xui-clients": ADMIN_BUTTON_CLIENTS,
+    "broadcast-all": ADMIN_BUTTON_BROADCAST_ALL,
+    "broadcast-active": ADMIN_BUTTON_BROADCAST_ACTIVE,
+    "refresh": ADMIN_BUTTON_REFRESH_MENUS,
+    "stats": ADMIN_BUTTON_STATS,
+    "help": ADMIN_BUTTON_HELP,
+    "trial": ADMIN_BUTTON_TRIAL_SETTINGS,
+    "admins": ADMIN_BUTTON_ADMIN_SETTINGS,
+}
+ADMIN_MENU_ACTION_BY_LABEL = {label: action for action, label in ADMIN_MENU_ACTIONS.items()}
+
 
 def client_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -1227,19 +1254,24 @@ def client_balance_topup_keyboard(topup_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def admin_main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
+def admin_navigation_keyboard(rows: list[list[str]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"adminmenu:{ADMIN_MENU_ACTION_BY_LABEL[label]}") for label in row]
+        for row in rows
+    ])
+
+
+def admin_main_keyboard() -> InlineKeyboardMarkup:
+    return admin_navigation_keyboard(
         [
             [ADMIN_BUTTON_REQUESTS_GROUP, ADMIN_BUTTON_TICKETS_GROUP],
             [ADMIN_BUTTON_XUI_GROUP, ADMIN_BUTTON_CLIENTS_GROUP],
             [ADMIN_BUTTON_SERVICE_GROUP],
         ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите раздел",
     )
 
 
-def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
+def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     sections = {
         "requests": [[ADMIN_BUTTON_SUBSCRIPTION_EVENTS], [ADMIN_BUTTON_TOPUPS]],
         "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY], [ADMIN_BUTTON_NEW_CLIENT_MESSAGES]],
@@ -1252,7 +1284,7 @@ def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> Reply
         buttons.append([ADMIN_BUTTON_TRIAL_SETTINGS])
     if section == "service" and is_super_admin(user_id):
         buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
-    return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True)
+    return admin_navigation_keyboard(buttons + [[ADMIN_BUTTON_BACK]])
 
 
 def message_type(message) -> str:
