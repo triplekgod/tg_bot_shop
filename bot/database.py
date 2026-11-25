@@ -6,8 +6,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+class DatabaseConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=DatabaseConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -197,6 +205,15 @@ def init_db() -> None:
                 setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_history ON tickets(user_id, updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_open ON tickets(user_id, id DESC) WHERE status = 'open';
+            CREATE INDEX IF NOT EXISTS idx_tickets_status_updated ON tickets(status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_ticket_id ON messages(ticket_id, id);
+            CREATE INDEX IF NOT EXISTS idx_admin_message_map_ticket ON admin_message_map(ticket_id);
+            CREATE INDEX IF NOT EXISTS idx_balance_transactions_user_kind ON balance_transactions(user_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_balance_topups_status_id ON balance_topups(status, id);
+            CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_user_id);
             """
         )
         # Миграция для уже созданных баз: старые версии бота могли создать
@@ -230,6 +247,13 @@ def init_db() -> None:
         subscription_columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_requests)").fetchall()}
         if "price_rub" not in subscription_columns:
             conn.execute("ALTER TABLE subscription_requests ADD COLUMN price_rub INTEGER")
+        topup_columns = {row[1] for row in conn.execute("PRAGMA table_info(balance_topups)")}
+        if "stars_charge_id" not in topup_columns:
+            conn.execute("ALTER TABLE balance_topups ADD COLUMN stars_charge_id TEXT")
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_balance_topups_charge ON balance_topups(stars_charge_id)
+               WHERE stars_charge_id IS NOT NULL AND stars_charge_id != ''""",
+        )
 
         for admin_id in ENV_ADMIN_IDS | ({SUPER_ADMIN_ID} if SUPER_ADMIN_ID else set()):
             if admin_id:
@@ -473,16 +497,11 @@ def set_referrer(referral_user_id: int, referrer_user_id: int) -> bool:
 def delete_user_completely(user_id: int) -> bool:
     """Удалить локальный профиль и связанные данные бота, не трогая 3x-ui."""
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         if not conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone():
             return False
-        ticket_rows = conn.execute("SELECT id FROM tickets WHERE user_id = ?", (user_id,)).fetchall()
-        ticket_ids = [int(row["id"]) for row in ticket_rows]
-        if ticket_ids:
-            placeholders = ", ".join("?" for _ in ticket_ids)
-            conn.execute(f"DELETE FROM admin_message_map WHERE ticket_id IN ({placeholders})", ticket_ids)
-            conn.execute(f"DELETE FROM messages WHERE ticket_id IN ({placeholders})", ticket_ids)
-            conn.execute(f"DELETE FROM renewal_requests WHERE ticket_id IN ({placeholders})", ticket_ids)
-            conn.execute(f"DELETE FROM subscription_requests WHERE ticket_id IN ({placeholders})", ticket_ids)
+        for table in ("admin_message_map", "messages", "renewal_requests", "subscription_requests"):
+            conn.execute(f"DELETE FROM {table} WHERE ticket_id IN (SELECT id FROM tickets WHERE user_id = ?)", (user_id,))
         conn.execute("DELETE FROM tickets WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM referrals WHERE referral_user_id = ? OR referrer_user_id = ?", (user_id, user_id))
         conn.execute("DELETE FROM balance_transactions WHERE user_id = ?", (user_id,))
@@ -532,12 +551,22 @@ def add_balance_transaction(user_id: int, amount: int, kind: str, note: str = ""
 
 def set_balance(user_id: int, target_amount: int, admin_id: int) -> bool:
     """Выставляет итоговый баланс через прозрачную корректирующую операцию."""
-    if target_amount < 0 or not get_user(user_id):
+    if target_amount < 0:
         return False
-    current = balance_of(user_id)
-    delta = target_amount - current
-    if delta:
-        add_balance_transaction(user_id, delta, "admin_adjustment", f"Корректировка администратором {admin_id}")
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone():
+            return False
+        current = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM balance_transactions WHERE user_id = ?", (user_id,),
+        ).fetchone()[0]
+        delta = target_amount - int(current)
+        if delta:
+            conn.execute(
+                """INSERT INTO balance_transactions(user_id, amount, kind, note, created_at)
+                   VALUES (?, ?, 'admin_adjustment', ?, ?)""",
+                (user_id, delta, f"Корректировка администратором {admin_id}", now_iso()),
+            )
     return True
 
 
@@ -565,7 +594,10 @@ def set_user_monthly_price(user_id: int, price: Optional[int]) -> bool:
 
 
 def spend_balance(user_id: int, amount: int, note: str) -> bool:
+    if amount <= 0:
+        return False
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         current = int(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM balance_transactions WHERE user_id = ?", (user_id,)).fetchone()[0])
         if current < amount:
             return False
@@ -584,12 +616,24 @@ def get_balance_topup(topup_id: int) -> Optional[sqlite3.Row]:
         return conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)).fetchone()
 
 
-def confirm_balance_topup(topup_id: int, admin_id: int, charge_id: str = "") -> Optional[sqlite3.Row]:
+def confirm_balance_topup(
+    topup_id: int, admin_id: int, charge_id: str = "", *,
+    stars_payment: Optional[tuple[int, int]] = None,
+) -> Optional[sqlite3.Row]:
     """Пополнение и реферальная награда выполняются в одной транзакции и только раз."""
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         topup = conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)).fetchone()
         if not topup or str(topup["status"]) != "pending":
             return None
+        if stars_payment is not None:
+            user_id, amount = stars_payment
+            if not charge_id or (topup["user_id"], topup["amount"], topup["method"]) != (user_id, amount, "stars"):
+                return None
+            if conn.execute(
+                "SELECT 1 FROM balance_topups WHERE stars_charge_id = ? AND stars_charge_id != ''", (charge_id,),
+            ).fetchone():
+                return None
         conn.execute("UPDATE balance_topups SET status='confirmed', confirmed_at=?, confirmed_by=?, stars_charge_id=? WHERE id=?", (now_iso(), admin_id, charge_id, topup_id))
         conn.execute("INSERT INTO balance_transactions(user_id, amount, kind, note, created_at) VALUES (?, ?, 'topup', ?, ?)", (topup["user_id"], topup["amount"], f"Пополнение #{topup_id}", now_iso()))
         ref = conn.execute("SELECT referrer_user_id FROM referrals WHERE referral_user_id = ?", (topup["user_id"],)).fetchone()
@@ -603,11 +647,36 @@ def confirm_balance_topup(topup_id: int, admin_id: int, charge_id: str = "") -> 
 def cancel_balance_topup(topup_id: int) -> Optional[sqlite3.Row]:
     """Отменяет только ещё не подтверждённое пополнение без движения средств."""
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         topup = conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)).fetchone()
         if not topup or str(topup["status"]) != "pending":
             return None
         conn.execute("UPDATE balance_topups SET status = 'cancelled' WHERE id = ?", (topup_id,))
     return topup
+
+
+def message_type(message: Message) -> str:
+    if message.text:
+        return "text"
+    if message.photo:
+        return "photo"
+    if message.document:
+        return "document"
+    if message.video:
+        return "video"
+    if message.voice:
+        return "voice"
+    if message.audio:
+        return "audio"
+    if message.sticker:
+        return "sticker"
+    if message.location:
+        return "location"
+    if message.contact:
+        return "contact"
+    if message.animation:
+        return "animation"
+    return "other"
 
 
 def add_subscription_welcome_message(admin_id: int, message: Message) -> int:
@@ -757,7 +826,9 @@ async def send_subscription_welcome_messages(context: ContextTypes.DEFAULT_TYPE,
     return sent
 
 
-async def resolve_xui_email_for_user(telegram_user_id: int) -> tuple[Optional[str], str]:
+async def resolve_xui_email_for_user(
+    telegram_user_id: int, *, api: Optional["XuiClient"] = None,
+) -> tuple[Optional[str], str]:
     """Получить email клиента по Telegram ID.
 
     Приоритет:
@@ -773,10 +844,13 @@ async def resolve_xui_email_for_user(telegram_user_id: int) -> tuple[Optional[st
         return local_email, "local"
 
     try:
-        async with XuiClient() as api:
+        if api is not None:
             panel_email = await api.find_client_email_by_tg_id(telegram_user_id)
+        else:
+            async with XuiClient() as client:
+                panel_email = await client.find_client_email_by_tg_id(telegram_user_id)
     except XuiApiError as exc:
-        logger.warning("Не удалось автоматически найти 3x-ui клиента по Telegram ID %s: %s", telegram_user_id, exc)
+        logger.warning("Не удалось автоматически найти 3x-ui клиента по Telegram ID %s", telegram_user_id)
         return None, f"error:{exc}"
 
     if panel_email:

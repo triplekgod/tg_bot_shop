@@ -29,8 +29,12 @@ class XuiClient:
         return f"{self.base_url}/{path.lstrip('/')}"
 
     async def __aenter__(self) -> "XuiClient":
-        if not self._logged_in:
-            await self.login()
+        try:
+            if not self._logged_in:
+                await self.login()
+        except BaseException:
+            await self._client.aclose()
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

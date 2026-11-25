@@ -203,20 +203,22 @@ def mark_renewal_stars_invoice_sent(ticket_id: int, admin_id: int, stars_amount:
         )
 
 
-def mark_renewal_stars_paid(ticket_id: int, user_id: int, charge_id: str, stars_amount: int) -> None:
+def mark_renewal_stars_paid(ticket_id: int, user_id: int, charge_id: str, stars_amount: int) -> bool:
     with db() as conn:
-        conn.execute(
+        result = conn.execute(
             """
             UPDATE renewal_requests
             SET payment_confirmed_at = COALESCE(payment_confirmed_at, ?),
                 payment_confirmed_by = COALESCE(payment_confirmed_by, ?),
                 payment_method = 'stars',
-                stars_charge_id = COALESCE(stars_charge_id, ?),
+                stars_charge_id = ?,
                 stars_amount = COALESCE(stars_amount, ?)
-            WHERE ticket_id = ? AND telegram_user_id = ? AND status = 'pending'
+            WHERE ticket_id = ? AND telegram_user_id = ? AND status = 'pending' AND payment_method = 'stars'
+              AND COALESCE(stars_charge_id, '') = '' AND (stars_amount IS NULL OR stars_amount = ?)
             """,
-            (now_iso(), user_id, charge_id, stars_amount, ticket_id, user_id),
+            (now_iso(), user_id, charge_id, stars_amount, ticket_id, user_id, stars_amount),
         )
+        return result.rowcount == 1
 
 
 def renewal_payment_details_sent(ticket_id: int) -> bool:
@@ -722,18 +724,20 @@ def mark_subscription_stars_invoice_sent(ticket_id: int, admin_id: int, stars_am
         )
 
 
-def mark_subscription_stars_paid(ticket_id: int, user_id: int, charge_id: str, stars_amount: int) -> None:
+def mark_subscription_stars_paid(ticket_id: int, user_id: int, charge_id: str, stars_amount: int) -> bool:
     with db() as conn:
-        conn.execute(
+        result = conn.execute(
             """
             UPDATE subscription_requests
             SET payment_confirmed_at = COALESCE(payment_confirmed_at, ?),
                 payment_confirmed_by = COALESCE(payment_confirmed_by, ?),
                 stars_charge_id = ?, stars_amount = COALESCE(stars_amount, ?)
-            WHERE ticket_id = ?
+            WHERE ticket_id = ? AND telegram_user_id = ? AND status = 'pending' AND payment_method = 'stars'
+              AND COALESCE(stars_charge_id, '') = '' AND (stars_amount IS NULL OR stars_amount = ?)
             """,
-            (now_iso(), user_id, charge_id, stars_amount, ticket_id),
+            (now_iso(), user_id, charge_id, stars_amount, ticket_id, user_id, stars_amount),
         )
+        return result.rowcount == 1
 
 
 def update_subscription_request_input(ticket_id: int, email: Optional[str], days: int) -> None:
@@ -1283,30 +1287,6 @@ def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> Reply
         buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
         buttons.append([ADMIN_BUTTON_ENV_SETTINGS])
     return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True, is_persistent=True)
-
-
-def message_type(message) -> str:
-    if message.text:
-        return "text"
-    if message.photo:
-        return "photo"
-    if message.document:
-        return "document"
-    if message.video:
-        return "video"
-    if message.voice:
-        return "voice"
-    if message.audio:
-        return "audio"
-    if message.sticker:
-        return "sticker"
-    if message.location:
-        return "location"
-    if message.contact:
-        return "contact"
-    if message.animation:
-        return "animation"
-    return "other"
 
 
 def require_admin(func):

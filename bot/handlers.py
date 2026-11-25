@@ -46,7 +46,7 @@ class ChatUpdateProcessor(BaseUpdateProcessor):
         # Keep an active reference to the lock until all work for this chat has finished.
         chat_lock = self.chat_locks.setdefault(chat_id, asyncio.Lock())
         async with chat_lock:
-            if isinstance(update, Update) and self.is_client_navigation(update):
+            if isinstance(update, Update) and (update.pre_checkout_query or self.is_client_navigation(update)):
                 await coroutine
             else:
                 # Payment and admin handlers can affect other chats and share records.
@@ -1193,7 +1193,7 @@ async def notify_user_about_successful_subscription(
             "Ссылка подписки не сформирована: в ответе 3x-ui нет subId/subscriptionLink "
             "или неправильно настроен XUI_PUBLIC_SUBSCRIPTION_BASE_URL / XUI_SUBSCRIPTION_LINK_TEMPLATE."
         )
-        logger.warning("%s result=%s", err, result)
+        logger.warning("Обращение #%s: %s", ticket_id, err)
         report["errors"].append(err)
         try:
             await context.bot.send_message(
@@ -1406,7 +1406,16 @@ async def try_auto_create_subscription_after_stars_payment(
 
 
 async def show_client_subscription(screen: MenuScreen, user_id: int) -> None:
-    xui_email, source = await resolve_xui_email_for_user(user_id)
+    xui_email = None
+    try:
+        async with XuiClient() as api:
+            xui_email, source = await resolve_xui_email_for_user(user_id, api=api)
+            summary = await api.get_client_summary(xui_email) if xui_email else None
+    except XuiApiError as exc:
+        if xui_email:
+            await screen.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
+            return
+        source = "error:connection"
     if not xui_email:
         if source.startswith("error:"):
             await screen.reply_text(
@@ -1419,12 +1428,6 @@ async def show_client_subscription(screen: MenuScreen, user_id: int) -> None:
             parse_mode=ParseMode.HTML,
             reply_markup=subscription_purchase_keyboard(trial_subscriptions_enabled() and not get_trial_subscription(user_id)),
         )
-        return
-    try:
-        async with XuiClient() as api:
-            summary = await api.get_client_summary(xui_email)
-    except XuiApiError as exc:
-        await screen.reply_text(f"Не удалось получить данные подписки: {exc}", reply_markup=client_main_keyboard())
         return
     if not summary:
         await screen.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
@@ -3636,18 +3639,16 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Рассылка завершена. Отправлено: {ok}, ошибок: {failed}.")
 
 
-async def send_actual_menu_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+async def send_actual_menu_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, *, admin: bool) -> bool:
     """Отправляет актуальное меню администратора или нижнюю клавиатуру клиента."""
     try:
-        if is_admin(user_id):
+        if admin:
             await context.bot.send_message(
                 chat_id=user_id,
                 text="🔄 Меню администратора обновлено. Используйте кнопки ниже.",
                 reply_markup=admin_main_keyboard(),
             )
         else:
-            if is_banned(user_id):
-                return False
             await context.bot.send_message(
                 chat_id=user_id,
                 text="🔄 Меню обновлено. Используйте кнопки ниже.",
@@ -3666,10 +3667,11 @@ async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     with db() as conn:
-        rows = conn.execute("SELECT user_id FROM users").fetchall()
+        rows = conn.execute("SELECT user_id, is_banned FROM users").fetchall()
 
-    user_ids = {int(row["user_id"]) for row in rows}
-    user_ids.update(get_admin_ids())
+    admins = set(get_admin_ids())
+    user_ids = {int(row["user_id"]) for row in rows} | admins
+    banned = {int(row["user_id"]) for row in rows if row["is_banned"]}
 
     current_user = update.effective_user
     ok = int(bool(current_user and current_user.id in user_ids))
@@ -3678,10 +3680,11 @@ async def update_menus_command(update: Update, context: ContextTypes.DEFAULT_TYP
     failed = 0
     skipped = 0
     for user_id in sorted(user_ids):
-        if not is_admin(user_id) and is_banned(user_id):
+        admin = user_id in admins
+        if not admin and user_id in banned:
             skipped += 1
             continue
-        if await send_actual_menu_to_user(context, user_id):
+        if await send_actual_menu_to_user(context, user_id, admin=admin):
             ok += 1
         else:
             failed += 1
@@ -5035,6 +5038,9 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not request or str(request["status"]) != "pending":
         await query.answer(ok=False, error_message="Заявка не найдена или уже закрыта.")
         return
+    if request["payment_confirmed_at"] or request["stars_charge_id"]:
+        await query.answer(ok=False, error_message="Эта заявка уже оплачена.")
+        return
 
     if int(request["telegram_user_id"]) != int(query.from_user.id):
         await query.answer(ok=False, error_message="Этот счёт относится к другому пользователю.")
@@ -5048,7 +5054,7 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer(ok=False, error_message="Ожидалась оплата Telegram Stars.")
         return
 
-    if int(query.total_amount) != int(stars_amount):
+    if int(query.total_amount) != int(stars_amount) or request["stars_amount"] not in (None, stars_amount):
         await query.answer(ok=False, error_message="Сумма счёта не совпадает с заявкой.")
         return
 
@@ -5070,8 +5076,10 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
             return
         if payment.currency != "XTR" or int(payment.total_amount) != amount:
             return
-        topup = confirm_balance_topup(topup_id, 0, payment.telegram_payment_charge_id)
-        if not topup or int(topup["user_id"]) != user.id:
+        topup = confirm_balance_topup(
+            topup_id, 0, payment.telegram_payment_charge_id, stars_payment=(user.id, amount),
+        )
+        if not topup:
             await message.reply_text("Платёж получен, но пополнение уже обработано или не найдено. Напишите в поддержку.")
             return
         await message.reply_text(
@@ -5081,7 +5089,10 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
         return
 
     kind, ticket_id, stars_amount = parse_stars_payload_kind(payment.invoice_payload)
-    if not ticket_id or not stars_amount:
+    if (
+        not ticket_id or not stars_amount or payment.currency != "XTR"
+        or int(payment.total_amount) != stars_amount or not payment.telegram_payment_charge_id
+    ):
         return
 
     if kind == "subscription":
@@ -5089,12 +5100,16 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
         if not request or int(request["telegram_user_id"]) != user.id:
             await message.reply_text("Платёж получен, но заявка не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
             return
-        mark_subscription_stars_paid(
+        accepted = mark_subscription_stars_paid(
             ticket_id=ticket_id,
             user_id=user.id,
             charge_id=payment.telegram_payment_charge_id,
             stars_amount=int(payment.total_amount),
         )
+        if not accepted:
+            if request["stars_charge_id"] != payment.telegram_payment_charge_id:
+                await message.reply_text("Платёж не удалось привязать к заявке. Напишите в поддержку.", reply_markup=client_main_keyboard())
+            return
         log_message(
             ticket_id=ticket_id,
             direction="user_to_admin",
@@ -5111,12 +5126,16 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
         await message.reply_text("Платёж получен, но заявка не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
         return
 
-    mark_renewal_stars_paid(
+    accepted = mark_renewal_stars_paid(
         ticket_id=ticket_id,
         user_id=user.id,
         charge_id=payment.telegram_payment_charge_id,
         stars_amount=int(payment.total_amount),
     )
+    if not accepted:
+        if request["stars_charge_id"] != payment.telegram_payment_charge_id:
+            await message.reply_text("Платёж не удалось привязать к заявке. Напишите в поддержку.", reply_markup=client_main_keyboard())
+        return
     log_message(
         ticket_id=ticket_id,
         direction="user_to_admin",

@@ -168,7 +168,10 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
         keyboard_id = self.context.chat_data["menu_screen_ids"][0]
         self.assertTrue(self.last_reply_markup.is_persistent)
 
-        with patch.object(handlers, "resolve_xui_email_for_user", return_value=(None, "missing")):
+        with (
+            patch.object(handlers, "XuiClient"),
+            patch.object(handlers, "resolve_xui_email_for_user", return_value=(None, "missing")),
+        ):
             await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
             inline_screen_id = self.context.chat_data["menu_screen_ids"][0]
             self.assertNotEqual(inline_screen_id, keyboard_id)
@@ -521,6 +524,17 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             self.reply_text.await_args.args[0],
         )
         self.assertTrue(self.reply_text.await_args.kwargs["link_preview_options"].is_disabled)
+
+    async def test_subscription_lookup_and_summary_share_one_xui_session(self):
+        with patch.object(handlers, "XuiClient") as client:
+            api = client.return_value.__aenter__.return_value
+            api.find_client_email_by_tg_id = AsyncMock(return_value="vpn-client")
+            api.get_client_summary = AsyncMock(return_value={"subId": "test-id", "expiry_ms": 0})
+            await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
+        client.assert_called_once_with()
+        api.find_client_email_by_tg_id.assert_awaited_once_with(2)
+        api.get_client_summary.assert_awaited_once_with("vpn-client")
+        self.assertEqual(database.get_xui_link(2), "vpn-client")
 
     async def test_new_subscription_sends_both_links_in_same_message(self):
         with (
