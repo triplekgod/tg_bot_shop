@@ -1185,6 +1185,7 @@ ADMIN_BUTTON_ADMIN_SETTINGS = "👑 Админы и уведомления"
 ADMIN_BUTTON_TRIAL_SETTINGS = "🎁 Пробные подписки"
 ADMIN_BUTTON_BACK = "⬅️ Главное меню"
 
+# Callbacks from admin menus sent by the previous version.
 ADMIN_MENU_ACTIONS = {
     "main": ADMIN_BUTTON_BACK,
     "requests": ADMIN_BUTTON_REQUESTS_GROUP,
@@ -1210,7 +1211,6 @@ ADMIN_MENU_ACTIONS = {
     "trial": ADMIN_BUTTON_TRIAL_SETTINGS,
     "admins": ADMIN_BUTTON_ADMIN_SETTINGS,
 }
-ADMIN_MENU_ACTION_BY_LABEL = {label: action for action, label in ADMIN_MENU_ACTIONS.items()}
 
 
 def client_main_keyboard() -> ReplyKeyboardMarkup:
@@ -1254,24 +1254,20 @@ def client_balance_topup_keyboard(topup_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def admin_navigation_keyboard(rows: list[list[str]]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(label, callback_data=f"adminmenu:{ADMIN_MENU_ACTION_BY_LABEL[label]}") for label in row]
-        for row in rows
-    ])
-
-
-def admin_main_keyboard() -> InlineKeyboardMarkup:
-    return admin_navigation_keyboard(
+def admin_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
         [
             [ADMIN_BUTTON_REQUESTS_GROUP, ADMIN_BUTTON_TICKETS_GROUP],
             [ADMIN_BUTTON_XUI_GROUP, ADMIN_BUTTON_CLIENTS_GROUP],
             [ADMIN_BUTTON_SERVICE_GROUP],
         ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите раздел",
     )
 
 
-def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     sections = {
         "requests": [[ADMIN_BUTTON_SUBSCRIPTION_EVENTS], [ADMIN_BUTTON_TOPUPS]],
         "tickets": [[ADMIN_BUTTON_TICKETS, ADMIN_BUTTON_HISTORY], [ADMIN_BUTTON_NEW_CLIENT_MESSAGES]],
@@ -1284,7 +1280,7 @@ def admin_section_keyboard(section: str, user_id: Optional[int] = None) -> Inlin
         buttons.append([ADMIN_BUTTON_TRIAL_SETTINGS])
     if section == "service" and is_super_admin(user_id):
         buttons.append([ADMIN_BUTTON_ADMIN_SETTINGS])
-    return admin_navigation_keyboard(buttons + [[ADMIN_BUTTON_BACK]])
+    return ReplyKeyboardMarkup(buttons + [[ADMIN_BUTTON_BACK]], resize_keyboard=True, is_persistent=True)
 
 
 def message_type(message) -> str:

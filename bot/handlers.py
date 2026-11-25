@@ -1,7 +1,6 @@
 from collections.abc import Awaitable
 from weakref import WeakValueDictionary
 
-from telegram import ReplyKeyboardRemove
 from telegram.error import BadRequest
 from telegram.ext import BaseUpdateProcessor
 
@@ -109,19 +108,7 @@ class MenuScreen:
                 except TelegramError:
                     pass
 
-    def add_admin_menu_link(self, kwargs: dict) -> None:
-        user = self.update.effective_user
-        markup = kwargs.get("reply_markup")
-        if not user or not is_admin(user.id) or (markup is not None and not isinstance(markup, InlineKeyboardMarkup)):
-            return
-        rows = markup.inline_keyboard if markup else ()
-        if any((button.callback_data or "").startswith("adminmenu:") for row in rows for button in row):
-            return
-        back = InlineKeyboardButton(ADMIN_BUTTON_BACK, callback_data="adminmenu:main")
-        kwargs["reply_markup"] = InlineKeyboardMarkup([*rows, [back]])
-
     async def reply_text(self, text: str, **kwargs) -> None:
-        self.add_admin_menu_link(kwargs)
         chat_data = self.context.chat_data
         markup = kwargs.get("reply_markup")
         inline_id = chat_data.get("menu_editable_id")
@@ -153,7 +140,6 @@ class MenuScreen:
         await self.track(sent.message_id, replaced_keyboard_id)
 
     async def edit_text(self, *args, **kwargs) -> None:
-        self.add_admin_menu_link(kwargs)
         await self.update.callback_query.edit_message_text(*args, **kwargs)
         if self.message.message_id in self.message_ids:
             await self.track(self.message.message_id)
@@ -168,19 +154,6 @@ class MenuScreen:
             await self.message.delete()
         except TelegramError:
             pass
-
-
-async def remove_legacy_admin_keyboard(screen: MenuScreen) -> None:
-    if screen.context.chat_data.get("admin_reply_keyboard_removed"):
-        return
-    try:
-        sent = await screen.context.bot.send_message(
-            chat_id=screen.message.chat_id, text="Обновляю меню…", reply_markup=ReplyKeyboardRemove(),
-        )
-        screen.context.chat_data["admin_reply_keyboard_removed"] = True
-        await sent.delete()
-    except TelegramError:
-        pass
 
 
 def discard_draft_input(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,10 +188,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("✅ Вы зарегистрированы по реферальной ссылке. Вашему пригласившему будет начисляться 25% с ваших пополнений.")
 
     if is_admin(user.id):
-        await remove_legacy_admin_keyboard(screen)
         await screen.reply_text(
             "Панель техподдержки.\n\n"
-            "Кнопки под сообщением открывают обращения, заявки, клиентов 3x-ui, статистику и рассылки.\n\n"
+            "Нижнее меню открывает обращения, заявки, клиентов 3x-ui, статистику и рассылки.\n\n"
             "Основные команды:\n"
             "/tickets — открытые обращения\n"
             "/history — история обращений\n"
@@ -2060,7 +2032,6 @@ async def handle_admin_menu_button(
     clear_pending_input(context)
     if menu_label is None:
         screen.remove_menu_press()
-        await remove_legacy_admin_keyboard(screen)
 
     if text in sections:
         section = sections[text]
