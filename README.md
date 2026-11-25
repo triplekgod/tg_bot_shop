@@ -616,6 +616,12 @@ XUI_NEW_CLIENT_COMMENT=Создано ботом техподдержки
 XUI_SUBSCRIPTION_LINK_TEMPLATE={base}/sub/{subId}
 ```
 
+В карточке подписки и при выдаче бот показывает обе ссылки. Включите JSON-подписку в 3x-ui и укажите её путь в `.env`, если он отличается от `/json/`. Пустое значение скрывает JSON-ссылку.
+
+```env
+XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE={base}/json/{subId}
+```
+
 Если у вас отдельный адрес для подписок, укажите его в `.env`:
 
 ```env

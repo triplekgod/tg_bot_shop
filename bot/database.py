@@ -1,3 +1,5 @@
+from urllib.parse import unquote, urlsplit
+
 from .config import *
 
 def now_iso() -> str:
@@ -655,14 +657,8 @@ def count_subscription_welcome_messages() -> int:
         return int(row["c"] or 0)
 
 
-def build_subscription_link(result: dict[str, Any]) -> Optional[str]:
-    """Собрать ссылку подписки для нового клиента.
-
-    Поддерживает разные варианты ответа 3x-ui: готовую ссылку, subId/sub_id/subID
-    или шаблон, где можно использовать email. Это важно, потому что разные версии
-    3x-ui возвращают поле подписки по-разному.
-    """
-    ready_link = str(
+def _ready_subscription_link(result: dict[str, Any]) -> str:
+    link = str(
         result.get("subscriptionLink")
         or result.get("subscriptionUrl")
         or result.get("subLink")
@@ -670,41 +666,73 @@ def build_subscription_link(result: dict[str, Any]) -> Optional[str]:
         or result.get("url")
         or ""
     ).strip()
-    if ready_link.startswith(("http://", "https://")):
-        return ready_link
+    return link if link.startswith(("http://", "https://")) else ""
 
-    sub_id = str(
+
+def _subscription_id(result: dict[str, Any]) -> str:
+    return str(
         result.get("subId")
         or result.get("sub_id")
         or result.get("subID")
         or result.get("subid")
         or ""
     ).strip()
-    email = str(result.get("email") or "").strip()
 
+
+def _format_subscription_link(template: str, base: str, sub_id: str, email: str) -> Optional[str]:
+    if "{subId}" in template and not sub_id:
+        return None
+    if "{email}" in template and not email:
+        return None
+    return template.format(
+        base=base.rstrip("/"),
+        subId=quote(sub_id, safe=""),
+        email=quote(email, safe=""),
+    )
+
+
+def build_subscription_link(result: dict[str, Any]) -> Optional[str]:
+    ready_link = _ready_subscription_link(result)
+    if ready_link:
+        return ready_link
     base = XUI_PUBLIC_SUBSCRIPTION_BASE_URL or XUI_BASE_URL
     if not base:
         return None
 
     template = XUI_SUBSCRIPTION_LINK_TEMPLATE or "{base}/sub/{subId}"
-
-    # Если шаблон требует subId, а 3x-ui его не вернул, ссылку безопасно собрать нельзя.
-    # Если админ задал шаблон через {email}, разрешаем формирование без subId.
-    if "{subId}" in template and not sub_id:
-        return None
-    if "{email}" in template and not email:
-        return None
-
+    sub_id = _subscription_id(result)
+    email = str(result.get("email") or "").strip()
     try:
-        return template.format(
-            base=base.rstrip("/"),
-            subId=quote(sub_id, safe=""),
-            email=quote(email, safe=""),
-        )
-    except Exception:
-        if sub_id:
-            return f"{base.rstrip('/')}/sub/{quote(sub_id, safe='')}"
+        return _format_subscription_link(template, base, sub_id, email)
+    except (ValueError, KeyError, IndexError, AttributeError):
+        return _format_subscription_link("{base}/sub/{subId}", base, sub_id, email)
+
+
+def build_json_subscription_link(result: dict[str, Any]) -> Optional[str]:
+    template = XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE
+    if not template:
         return None
+
+    sub_id = _subscription_id(result)
+    email = str(result.get("email") or "").strip()
+    public_base = XUI_PUBLIC_SUBSCRIPTION_BASE_URL
+    try:
+        ready_url = urlsplit(_ready_subscription_link(result))
+        default_path = re.fullmatch(r"/sub/([^/]+)/?", ready_url.path)
+        if default_path and (not sub_id or "," in sub_id):
+            sub_id = unquote(default_path[1])
+        if not public_base and ready_url.hostname:
+            public_base = f"{ready_url.scheme}://{ready_url.netloc}"
+        link = _format_subscription_link(
+            template, public_base or XUI_BASE_URL, sub_id if "," not in sub_id else "", email,
+        )
+        if link:
+            parsed = urlsplit(link)
+            if parsed.scheme in {"http", "https"} and parsed.hostname:
+                return link
+    except (ValueError, KeyError, IndexError, AttributeError):
+        return None
+    return None
 
 
 async def send_subscription_welcome_messages(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[int]:

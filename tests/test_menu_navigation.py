@@ -456,3 +456,42 @@ class MenuNavigationTests(unittest.IsolatedAsyncioTestCase):
             await handlers.button_callback(Update(999, callback_query=query), self.context)
         self.assertNotIn("env_edit_setting", self.context.user_data)
         self.context.bot.edit_message_text.assert_not_awaited()
+
+    async def test_subscription_card_shows_raw_and_json_for_existing_client(self):
+        with ExitStack() as stack:
+            self.mock_subscription(stack)
+            handlers.XuiClient.return_value.__aenter__.return_value.get_client_summary.return_value = {
+                "subId": "test-id", "expiry_ms": 0,
+            }
+            stack.enter_context(patch.multiple(
+                database,
+                XUI_PUBLIC_SUBSCRIPTION_BASE_URL="https://sub.example.test:2096",
+                XUI_SUBSCRIPTION_LINK_TEMPLATE="{base}/sub/{subId}",
+                XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE="{base}/json/{subId}?a=1&b=2",
+            ))
+            await self.press(2, handlers.CLIENT_BUTTON_SUBSCRIPTION)
+        self.assertIn("Обычная подписка\nhttps://sub.example.test:2096/sub/test-id", self.reply_text.await_args.args[0])
+        self.assertIn(
+            "JSON-подписка (Xray)\nhttps://sub.example.test:2096/json/test-id?a=1&amp;b=2",
+            self.reply_text.await_args.args[0],
+        )
+        self.assertTrue(self.reply_text.await_args.kwargs["link_preview_options"].is_disabled)
+
+    async def test_new_subscription_sends_both_links_in_same_message(self):
+        with (
+            patch.multiple(
+                database,
+                XUI_PUBLIC_SUBSCRIPTION_BASE_URL="https://sub.example.test",
+                XUI_SUBSCRIPTION_LINK_TEMPLATE="{base}/sub/{subId}",
+                XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE="{base}/json/{subId}",
+            ),
+            patch.object(handlers, "log_message"),
+            patch.object(handlers, "send_subscription_welcome_messages", return_value=[]),
+        ):
+            report = await handlers.notify_user_about_successful_subscription(
+                self.context, 1, 2, {"email": "vpn-client", "subId": "test-id"}, 30,
+            )
+        self.assertTrue(report["link_sent"])
+        message = self.context.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("https://sub.example.test/sub/test-id", message)
+        self.assertIn("https://sub.example.test/json/test-id", message)

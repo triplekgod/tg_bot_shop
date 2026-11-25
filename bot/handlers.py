@@ -930,9 +930,13 @@ async def process_client_subscription_payment_choice(
         await notify_admins_about_balance_subscription_operation(
             context, user, "subscription", months, days, cost, str(result.get("email") or email),
         )
-        link = build_subscription_link(result)
-        link_text = f"\nСсылка подписки: {link}" if link else ""
-        await screen.reply_text(f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}", reply_markup=client_main_keyboard())
+        links = format_subscription_links(build_subscription_link(result), build_json_subscription_link(result))
+        link_text = f"\n\n{links}" if links else ""
+        await screen.reply_text(
+            f"✅ Подписка создана на {days} дн. Списано {cost} ₽. Остаток: {balance_of(user.id)} ₽.{link_text}",
+            reply_markup=client_main_keyboard(),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
         return
 
     method = "stars" if method == "stars" else "manual"
@@ -979,6 +983,15 @@ async def process_client_subscription_payment_choice(
     )
 
 
+def format_subscription_links(regular: Optional[str], json_link: Optional[str], *, escape_html: bool = False) -> str:
+    lines = []
+    if regular:
+        lines.append(f"🔗 Обычная подписка\n{html.escape(regular) if escape_html else regular}")
+    if json_link:
+        lines.append(f"📄 JSON-подписка (Xray)\n{html.escape(json_link) if escape_html else json_link}")
+    return "\n\n".join(lines)
+
+
 def trial_profile_url(user) -> str:
     username = (getattr(user, "username", None) or "").strip().lstrip("@")
     return f"https://t.me/{quote(username, safe='')}" if username else f"tg://user?id={user.id}"
@@ -1020,12 +1033,23 @@ async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT
         expires_ms = safe_int(existing["expires_at_ms"])
         link = str(existing["subscription_link"] or "").strip()
         if str(existing["status"]) == "active" and expires_ms > int(time.time() * 1000):
-            link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Ссылка не была получена из панели. Обратитесь в поддержку."
+            json_link = build_json_subscription_link({"subscriptionLink": link, "email": existing["xui_email"]})
+            if not json_link and XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE:
+                try:
+                    async with XuiClient() as api:
+                        summary = await api.get_client_summary(existing["xui_email"])
+                    if summary:
+                        json_link = build_json_subscription_link(summary)
+                except XuiApiError:
+                    pass
+            links = format_subscription_links(link, json_link, escape_html=True)
+            link_line = f"\n\n{links}" if links else "\n\n⚠️ Ссылка не была получена из панели. Обратитесь в поддержку."
             await screen.reply_text(
                 f"🎁 Тестовая подписка уже была выдана и действует до <b>{html.escape(format_xui_datetime(expires_ms))}</b>."
                 f"{link_line}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=client_main_keyboard(),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         elif str(existing["status"]) == "creating":
             await screen.reply_text("Тестовая подписка уже создаётся. Подождите немного и откройте раздел «📄 Подписка» снова.", reply_markup=client_main_keyboard())
@@ -1057,17 +1081,20 @@ async def issue_trial_subscription(update: Update, context: ContextTypes.DEFAULT
         return
 
     link = build_subscription_link(summary or result)
+    json_link = build_json_subscription_link(summary or result) or build_json_subscription_link(result)
     expiry_ms = safe_int((summary or result).get("expiry_ms") or result.get("new_expiry_ms"))
     if expiry_ms <= 0:
         expiry_ms = int(time.time() * 1000) + 24 * 60 * 60 * 1000
     activate_trial_subscription(user.id, link, expiry_ms)
     set_xui_link(user.id, created_email)
-    link_line = f"\n\n🔗 Ваша тестовая ссылка:\n{link}" if link else "\n\n⚠️ Подписка создана, но панель не вернула ссылку. Напишите в поддержку."
+    links = format_subscription_links(link, json_link, escape_html=True)
+    link_line = f"\n\n{links}" if links else "\n\n⚠️ Подписка создана, но панель не вернула ссылку. Напишите в поддержку."
     await screen.reply_text(
         f"🎁 Тестовая подписка на 1 день активирована до <b>{html.escape(format_xui_datetime(expiry_ms))}</b>."
         f"{link_line}",
         parse_mode=ParseMode.HTML,
         reply_markup=client_main_keyboard(),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     await notify_admins_about_trial_subscription(context, user, created_email, link)
 
@@ -1085,8 +1112,10 @@ async def notify_user_about_successful_subscription(
     какая именно часть не сработала: ссылка, инструкции или само сообщение.
     Теперь отчёт сохраняется и используется в админском уведомлении.
     """
-    new_expiry = format_xui_expiry(safe_int(result.get("new_expiry_ms")))
+    new_expiry = format_xui_datetime(safe_int(result.get("new_expiry_ms")))
     subscription_link = build_subscription_link(result)
+    json_link = build_json_subscription_link(result)
+    links = format_subscription_links(subscription_link, json_link)
     report: dict[str, Any] = {
         "main_message_sent": False,
         "link_sent": False,
@@ -1112,12 +1141,13 @@ async def notify_user_about_successful_subscription(
         result["_notify_report"] = report
         return report
 
-    if subscription_link:
+    if links:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"🔗 Ваша ссылка подписки:\n{subscription_link}",
+                text=links,
                 reply_markup=client_main_keyboard(),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             report["link_sent"] = True
             log_message(
@@ -1125,7 +1155,7 @@ async def notify_user_about_successful_subscription(
                 direction="admin_to_user",
                 telegram_message_id=None,
                 content_type="subscription_link_sent",
-                text=f"Клиенту отправлена ссылка подписки: {subscription_link}",
+                text=f"Клиенту отправлена ссылка подписки: {subscription_link or json_link}",
                 admin_id=0,
             )
         except TelegramError as exc:
@@ -1187,7 +1217,7 @@ async def notify_admins_about_subscription_created(
         f"✅ Клиент успешно создан по обращению <b>#{ticket_id}</b>.\n\n"
         f"Клиент: <code>{html.escape(str(result.get('email')))}</code>\n"
         f"Срок: <code>{days} дн.</code>\n"
-        f"Дата окончания: <code>{html.escape(format_xui_expiry(safe_int(result.get('new_expiry_ms'))))}</code>\n"
+        f"Дата окончания: <code>{html.escape(format_xui_datetime(safe_int(result.get('new_expiry_ms'))))}</code>\n"
         f"tgId: <code>{html.escape(str(result.get('tgId') or user_id))}</code>\n"
         f"Inbounds: <code>{html.escape(', '.join(map(str, result.get('inbound_ids') or [])))}</code>\n\n"
         f"Сообщение клиенту: {'✅ отправлено' if report.get('main_message_sent') else '⚠️ не отправлено'}\n"
@@ -1373,13 +1403,16 @@ async def show_client_subscription(screen: MenuScreen, user_id: int) -> None:
     if not summary:
         await screen.reply_text("Подписка в панели не найдена. Напишите в поддержку.", reply_markup=client_main_keyboard())
         return
-    link = build_subscription_link(summary)
+    links = format_subscription_links(
+        build_subscription_link(summary), build_json_subscription_link(summary), escape_html=True,
+    )
     expiry = format_xui_datetime(safe_int(summary.get("expiry_ms")))
-    link_line = f"\n\n🔗 Ваша ссылка подписки:\n{link}" if link else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
+    link_line = f"\n\n{links}" if links else "\n\n⚠️ Ссылка пока недоступна — обратитесь в поддержку."
     await screen.reply_text(
         f"📄 Ваша подписка\nEmail: <code>{html.escape(xui_email)}</code>\nДействует до: <b>{html.escape(expiry)}</b>{link_line}",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Продлить подписку", callback_data="subscription:renew")]]),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 

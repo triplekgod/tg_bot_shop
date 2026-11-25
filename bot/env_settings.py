@@ -36,7 +36,7 @@ ID_LIST_ENV_KEYS = {"ADMIN_IDS", "XUI_NEW_CLIENT_INBOUND_IDS"}
 OPTIONAL_ENV_KEYS = {
     "XUI_BASE_URL", "XUI_PUBLIC_SUBSCRIPTION_BASE_URL", "XUI_API_TOKEN", "XUI_USERNAME", "XUI_PASSWORD",
     "XUI_MAIN_INBOUND_ID", "XUI_NEW_CLIENT_INBOUND_IDS", "XUI_NEW_CLIENT_FLOW", "XUI_NEW_CLIENT_GROUP",
-    "XUI_NEW_CLIENT_COMMENT", "XUI_SUBSCRIPTION_LINK_TEMPLATE", "ADMIN_IDS",
+    "XUI_NEW_CLIENT_COMMENT", "XUI_SUBSCRIPTION_LINK_TEMPLATE", "XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE", "ADMIN_IDS",
 }
 EDITABLE_ENV_KEYS = tuple(sorted(
     BOOLEAN_ENV_KEYS | POSITIVE_INTEGER_ENV_KEYS | NONNEGATIVE_INTEGER_ENV_KEYS |
@@ -60,7 +60,7 @@ ENV_SETTING_GROUPS = {
     "subscriptions": ("Подписки и продление", (
         "XUI_RENEW_MODE", "XUI_CLIENTS_RENEW_METHOD", "XUI_RENEW_EXPIRED_FROM_NOW", "XUI_MAIN_INBOUND_ID",
         "XUI_DEFAULT_RENEW_DAYS", "XUI_DAYS_PER_MONTH", "XUI_MAX_RENEW_MONTHS", "XUI_RESTART_XRAY_AFTER_RENEW",
-        "XUI_PUBLIC_SUBSCRIPTION_BASE_URL", "XUI_SUBSCRIPTION_LINK_TEMPLATE",
+        "XUI_PUBLIC_SUBSCRIPTION_BASE_URL", "XUI_SUBSCRIPTION_LINK_TEMPLATE", "XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE",
     )),
     "stars": ("Telegram Stars", (
         "STARS_PAYMENTS_ENABLED", "STARS_PRICE_PER_MONTH", "STARS_MIN_AMOUNT", "STARS_MAX_AMOUNT",
@@ -99,6 +99,7 @@ ENV_DESCRIPTIONS = {
     "XUI_DAYS_PER_MONTH": "Сколько дней добавляет бот за один месяц подписки.",
     "XUI_DEFAULT_RENEW_DAYS": "Срок продления по умолчанию, если в команде администратора не указано число дней.",
     "XUI_GROUP_CLIENTS_BY_EMAIL": "Показывать один раз клиентов с одинаковым email, привязанных к нескольким inbounds.",
+    "XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE": "Шаблон ссылки Xray JSON. По умолчанию {base}/json/{subId}. Пустое значение скрывает JSON-ссылку.",
     "XUI_MAIN_INBOUND_ID": "ID основного inbound для создания и продления клиентов в режиме legacy_inbound.",
     "XUI_MAX_RENEW_MONTHS": "Максимальный срок в месяцах, который клиент может выбрать при оформлении или продлении.",
     "XUI_NEW_CLIENT_COMMENT": "Комментарий, который бот записывает новому клиенту 3x-ui через Clients API.",

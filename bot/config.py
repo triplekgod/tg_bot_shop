@@ -122,6 +122,7 @@ XUI_NEW_CLIENT_COMMENT = os.getenv("XUI_NEW_CLIENT_COMMENT", "Создано б�
 # или полностью переопределите шаблон XUI_SUBSCRIPTION_LINK_TEMPLATE.
 XUI_PUBLIC_SUBSCRIPTION_BASE_URL = os.getenv("XUI_PUBLIC_SUBSCRIPTION_BASE_URL", XUI_BASE_URL).strip().rstrip("/")
 XUI_SUBSCRIPTION_LINK_TEMPLATE = os.getenv("XUI_SUBSCRIPTION_LINK_TEMPLATE", "{base}/sub/{subId}").strip()
+XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE = os.getenv("XUI_JSON_SUBSCRIPTION_LINK_TEMPLATE", "{base}/json/{subId}").strip()
 
 # Telegram Stars: оплата цифровой услуги продления прямо внутри Telegram.
 # Для Stars provider_token должен быть пустым, валюта — XTR.
